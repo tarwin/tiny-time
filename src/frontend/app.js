@@ -12,12 +12,12 @@ let running = null;          // running entry (as of last load)
 let runBase = 0;
 const S = {                  // per-view state that survives re-renders
   timeSel: null, timeMode: 'day',
-  rep: { preset: 'month', from: null, to: null, client: '', project: '', by: 'project' },
+  rep: { preset: 'month', from: null, to: null, client: '', project: '', invoiced: '', by: 'project' },
   showArchived: false,
 };
 
 // ── navigation ───────────────────────────────────────────────────────────────
-const VIEWS = { time: renderTime, reports: renderReports, clients: renderClients, projects: renderProjects, tasks: renderTasks, settings: renderSettings };
+const VIEWS = { time: renderTime, reports: renderReports, clients: renderClients, projects: renderProjects, tasks: renderTasks, invoices: renderInvoices, data: renderData, settings: renderSettings };
 document.querySelectorAll('.nav').forEach((a) => (a.onclick = () => go(a.dataset.view)));
 function go(v) {
   if (v === 'new') { go('time'); entryModal(); return; }
@@ -93,6 +93,27 @@ const field = (label, input, hint) => [h('label', { class: 'f' }, label), input,
 const spacer = () => h('span', { class: 'grow' });
 async function confirmDanger(msg, detail, ok = 'Delete') { return tiny.dialog.confirm(msg, { detail, ok, cancel: 'Cancel' }); }
 
+// ── Harvest ──────────────────────────────────────────────────────────────────
+async function harvestImport() {
+  try {
+    const r = await call('importHarvest');
+    if (!r) return;
+    const inv = r.invoiced || [];
+    if (r.entries) {
+      await tiny.dialog.alert('Imported from Harvest', { detail: `${r.entries} time entries, ${(r.seconds / 3600).toFixed(1)} hours.`
+        + (r.duplicates ? ` ${r.duplicates} were already here and were skipped.` : '') });
+    }
+    if (inv.length) { go('invoices'); await harvestInvoicesModal(inv); }
+    else if (r.entries) go('reports');
+  } catch (x) { tiny.dialog.alert('Couldn’t import that file', { detail: errMsg(x) }); }
+}
+async function harvestExport(range) {
+  try {
+    const r = await call('exportHarvest', range || {});
+    if (r) tiny.notify && tiny.notify('Exported for Harvest', `${r.entries} entries → ${r.path}`);
+  } catch (x) { tiny.dialog.alert('Couldn’t export', { detail: errMsg(x) }); }
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // TIMESHEET
 // ════════════════════════════════════════════════════════════════════════════
@@ -104,9 +125,11 @@ async function renderTime() {
 
   const ws = parseYmd(week[0]), we = parseYmd(week[6]);
   const range = `${ws.getDate()} ${MON[ws.getMonth()]} – ${we.getDate()} ${MON[we.getMonth()]} ${we.getFullYear()}`;
-  m.append(top(S.timeMode === 'day' ? dayLabel(sel, today) : 'Week of ' + range,
+  // the arrows sit left of the title, so a longer or shorter date never moves them
+  m.append(h('div', { class: 'top' },
     h('button', { class: 'iconbtn', title: 'Previous', onclick: () => { S.timeSel = addDays(sel, S.timeMode === 'day' ? -1 : -7); refresh(); } }, icon('left')),
     h('button', { class: 'iconbtn', title: 'Next', onclick: () => { S.timeSel = addDays(sel, S.timeMode === 'day' ? 1 : 7); refresh(); } }, icon('right')),
+    h('h1', { style: { marginLeft: '4px' } }, S.timeMode === 'day' ? dayLabel(sel, today) : 'Week of ' + range),
     sel !== today ? h('button', { class: 'btn', onclick: () => { S.timeSel = today; refresh(); } }, 'Today') : null,
     spacer(),
     seg([['day', 'Day'], ['week', 'Week']], S.timeMode, (v) => { S.timeMode = v; refresh(); }),
@@ -150,11 +173,11 @@ async function renderTime() {
       h('div', { class: 'bar', style: { background: e.color } }),
       h('div', { class: 'm' },
         h('div', { class: 'p' }, e.project + ' ', h('span', { class: 'c' }, '(' + e.client + ')')),
-        h('div', { class: 't' }, e.task),
+        h('div', { class: 't' }, e.task, e.invoice_id ? h('span', { class: 'badge grey', style: { marginLeft: '8px' }, title: 'Invoiced ' + fmtDay(e.invoice_date) }, 'Invoiced' + (e.invoice_number ? ' · ' + e.invoice_number : '')) : null),
         e.notes ? h('div', { class: 'nt' }, e.notes) : null),
       h('div', { class: 'rowact' },
         h('button', { class: 'lnk', onclick: () => entryModal(e) }, 'Edit'),
-        h('button', { class: 'lnk danger', onclick: async () => { if (await confirmDanger('Delete this time entry?', `${fmtHM(e.seconds)} on ${e.project} · ${e.task}`)) call('deleteEntry', { id: e.id }); } }, 'Delete')),
+        h('button', { class: 'lnk danger', onclick: async () => { if (await confirmDanger('Delete this time entry?', `${fmtHM(e.seconds)} on ${e.project} · ${e.task}` + (e.invoice_id ? `. It’s on invoice ${e.invoice_number || ''}, which keeps the amount it was billed for.` : ''))) call('deleteEntry', { id: e.id }); } }, 'Delete')),
       h('div', { class: 'amt' }, amt ? money(amt, e.currency) : ''),
       h('div', { class: 'tm', 'data-live': run ? e.seconds : null, 'data-fmt': run ? 'hms' : null }, run ? fmtHMS(e.seconds) : fmtHM(e.seconds)),
       h('button', { class: 'tog', title: run ? 'Stop timer' : 'Start timer', onclick: () => (run ? call('stopTimer') : call('startEntry', { id: e.id })) }, icon(run ? 'stop' : 'play'))));
@@ -215,7 +238,8 @@ function entryModal(e, date) {
     } catch (x) { err.textContent = errMsg(x); }
   };
   openModal(e ? 'Edit Time Entry' : 'New Time Entry',
-    [...field('Project', pSel), ...field('Task', tSel), ...field('Notes', notes),
+    [e && e.invoice_id ? h('div', { class: 'hint', style: { marginTop: 0, marginBottom: '6px' } }, `On invoice ${e.invoice_number || ''} (${fmtDay(e.invoice_date)}). Changing it here doesn’t change what that invoice billed.`) : null,
+      ...field('Project', pSel), ...field('Task', tSel), ...field('Notes', notes),
       h('div', { class: 'cols' }, h('div', null, ...field('Date', dIn)), h('div', null, ...field('Duration', dur))), err],
     [e ? h('button', { class: 'btn danger ghost', onclick: async () => { await call('deleteEntry', { id: e.id }); closeModal(); } }, 'Delete') : null,
       spacer(), h('button', { class: 'btn', onclick: closeModal }, 'Cancel'), saveBtn]);
@@ -225,7 +249,7 @@ function entryModal(e, date) {
 // REPORTS
 // ════════════════════════════════════════════════════════════════════════════
 const PRESETS = [['week', 'This Week'], ['lastweek', 'Last Week'], ['last30', 'Last 30 Days'], ['month', 'This Month'], ['lastmonth', 'Last Month'],
-  ['quarter', 'This Quarter'], ['year', 'This Year'], ['last12', 'Last 12 Months'], ['custom', 'Custom…']];
+  ['quarter', 'This Quarter'], ['year', 'This Year'], ['last12', 'Last 12 Months'], ['all', 'All Time'], ['custom', 'Custom…']];
 function presetRange(p) {
   const t = parseYmd(today), y = t.getFullYear(), mo = t.getMonth();
   const w = weekOf(today, weekStart);
@@ -238,16 +262,21 @@ function presetRange(p) {
     case 'quarter': { const q = Math.floor(mo / 3) * 3; return [ymd(new Date(y, q, 1)), ymd(new Date(y, q + 3, 0))]; }
     case 'year': return [ymd(new Date(y, 0, 1)), ymd(new Date(y, 11, 31))];
     case 'last12': return [ymd(new Date(y, mo - 11, 1)), ymd(new Date(y, mo + 1, 0))];
+    case 'all': return ['0000-01-01', today];   // narrowed to the first entry once the rows are in
   }
   return [S.rep.from || ymd(new Date(y, mo, 1)), S.rep.to || today];
 }
 
 async function renderReports() {
   const R = S.rep;
-  const [from, to] = presetRange(R.preset);
-  R.from = from; R.to = to;
-  const res = await call('report', { from, to, client_id: R.client || null, project_id: R.project || null });
+  let [from, to] = presetRange(R.preset);
+  const res = await call('report', { from, to, client_id: R.client || null, project_id: R.project || null, invoiced: R.invoiced || null });
   const rows = res.rows;
+  if (R.preset === 'all') {        // rows come sorted by date
+    from = rows.length ? rows[0].date : today;
+    if (rows.length && rows[rows.length - 1].date > to) to = rows[rows.length - 1].date;
+  }
+  R.from = from; R.to = to;
   const m = main(); m.replaceChildren();
 
   // filters — one row above the charts
@@ -260,8 +289,12 @@ async function renderReports() {
   const pSel = h('select', { class: 'in sm', onchange: (e) => { R.project = e.target.value; refresh(); } },
     h('option', { value: '' }, 'All projects'),
     cat.projects.filter((p) => !R.client || String(p.client_id) === String(R.client)).map((p) => h('option', { value: p.id, selected: String(p.id) === String(R.project) }, p.name)));
-  m.append(top('Reports', preset, fromIn, h('span', { class: 'muted' }, '→'), toIn, cSel, pSel, spacer(),
-    h('button', { class: 'btn', onclick: async () => { const p = await call('exportCSV', { from, to, client_id: R.client || null, project_id: R.project || null }); if (p) tiny.notify && tiny.notify('Exported', p); } }, icon('download'), 'Export CSV')));
+  const iSel = h('select', { class: 'in sm', onchange: (e) => { R.invoiced = e.target.value; refresh(); } },
+    [['', 'Invoiced or not'], ['no', 'Not invoiced'], ['yes', 'Invoiced']].map(([v, l]) => h('option', { value: v, selected: v === (R.invoiced || '') }, l)));
+  const sel = { from, to, client_id: R.client || null, project_id: R.project || null, invoiced: R.invoiced || null };
+  m.append(top('Reports', preset, fromIn, h('span', { class: 'muted' }, '→'), toIn, cSel, pSel, iSel, spacer(),
+    h('button', { class: 'btn', onclick: async () => { const p = await call('exportCSV', sel); if (p) tiny.notify && tiny.notify('Exported', p); } }, icon('download'), 'Export CSV'),
+    h('button', { class: 'btn', title: 'The columns of Harvest’s Detailed time export', onclick: () => harvestExport(sel) }, icon('download'), 'Harvest CSV')));
 
   if (!rows.length) { m.append(h('div', { class: 'card empty-note' }, 'No time tracked in this range.')); return; }
 
@@ -672,6 +705,261 @@ async function renderSettings() {
         h('button', { class: 'btn danger', onclick: async () => {
           if (await confirmDanger('Erase all Tiny Time data?', 'Every client, project, task and time entry will be deleted. This can’t be undone.', 'Erase Everything')) call('wipeAll');
         } }, 'Erase all data')))));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// INVOICES
+// ════════════════════════════════════════════════════════════════════════════
+// A record of what was invoiced when, not the invoice itself: Tiny Tally (or
+// any other tool) makes that.
+const fmtDay = (s) => { const d = parseYmd(s); return d.getDate() + ' ' + MON[d.getMonth()] + ' ' + d.getFullYear(); };
+const fmtPeriod = (a, b) => (!a ? '' : a === b ? fmtDay(a) : fmtDay(a) + ' – ' + fmtDay(b));
+const sumMoney = (byCur) => Object.entries(byCur).filter(([, v]) => v).map(([c, v]) => money(v, c)).join(' + ') || money(0, 'USD');
+
+async function renderInvoices() {
+  const res = await call('invoices');
+  const m = main(); m.replaceChildren();
+  m.append(top('Invoices', spacer(),
+    h('button', { class: 'btn primary', disabled: !cat.clients.length, onclick: () => invoiceModal({}) }, '+ New Invoice')));
+
+  const ub = res.unbilled, invs = res.invoices;
+  const ubCur = {}, yrCur = {};
+  for (const u of ub) ubCur[u.currency] = (ubCur[u.currency] || 0) + u.amount;
+  const yr = res.today.slice(0, 4);
+  for (const i of invs) if (i.date.startsWith(yr)) yrCur[i.currency] = (yrCur[i.currency] || 0) + i.amount;
+  const last = invs[0];
+  m.append(h('div', { class: 'tiles' },
+    tile('Not invoiced', fmtHours(ub.reduce((a, u) => a + u.seconds, 0)) + ' h', ub.reduce((a, u) => a + u.n, 0) + ' entries'),
+    tile('Worth', sumMoney(ubCur), 'at your task rates'),
+    tile('Invoiced in ' + yr, sumMoney(yrCur), invs.filter((i) => i.date.startsWith(yr)).length + ' invoices'),
+    tile('Last invoice', last ? last.number || '—' : '—', last ? fmtDay(last.date) + ' · ' + last.client : 'none yet')));
+
+  m.append(h('h2', { class: 'sect' }, 'Not invoiced yet'));
+  if (!ub.length) m.append(h('div', { class: 'card empty-note' }, 'All your time is invoiced.'));
+  else m.append(h('div', { class: 'card' }, h('table', { class: 'grid' },
+    h('thead', null, h('tr', null, h('th', null, 'Project'), h('th', null, 'Since last invoice'), h('th', { class: 'r' }, 'Entries'),
+      h('th', { class: 'r' }, 'Hours'), h('th', { class: 'r' }, 'Amount'), h('th', null, ''))),
+    h('tbody', null, ub.map((u) => h('tr', null,
+      h('td', null, h('div', { class: 'barcell' }, h('span', { class: 'dot', style: { background: u.color } }),
+        h('div', null, h('b', null, u.project), h('span', { class: 'muted' }, ' · ' + u.client)))),
+      h('td', null, u.last_invoice ? (u.last_invoice.number || 'Invoice') + ', ' + fmtDay(u.last_invoice.date) : h('span', { class: 'muted' }, 'Never invoiced'),
+        h('div', { class: 'muted small' }, fmtPeriod(u.first, u.last))),
+      h('td', { class: 'r' }, String(u.n)),
+      h('td', { class: 'r' }, fmtHours(u.seconds)),
+      h('td', { class: 'r' }, money(u.amount, u.currency)),
+      h('td', { class: 'r' }, h('button', { class: 'btn', onclick: () => invoiceModal({ client_id: u.client_id, project_id: u.project_id }) }, 'Invoice…'))))))));
+
+  m.append(h('h2', { class: 'sect' }, 'Invoices'));
+  if (!invs.length) { m.append(h('div', { class: 'card empty-note' }, 'No invoices yet. When you bill a client, record it here and the time is marked as invoiced.')); return; }
+  m.append(h('div', { class: 'card' }, h('table', { class: 'grid' },
+    h('thead', null, h('tr', null, h('th', null, 'Number'), h('th', null, 'Issued'), h('th', null, 'Client'), h('th', null, 'Time covered'),
+      h('th', { class: 'r' }, 'Hours'), h('th', { class: 'r' }, 'Amount'), h('th', null, ''))),
+    h('tbody', null, invs.map((i) => h('tr', { class: 'click', ondblclick: () => editInvoiceModal(i) },
+      h('td', null, h('b', null, i.number || '—')),
+      h('td', null, fmtDay(i.date)),
+      h('td', null, i.client, i.project ? h('span', { class: 'muted' }, ' · ' + i.project) : null),
+      h('td', { class: 'muted' }, i.n ? fmtPeriod(i.first, i.last) : 'no entries left'),
+      h('td', { class: 'r', title: i.seconds_now !== i.seconds ? `Its entries now add up to ${fmtHours(i.seconds_now)} h` : null },
+        fmtHours(i.seconds), i.seconds_now !== i.seconds ? ' *' : ''),
+      h('td', { class: 'r' }, money(i.amount, i.currency)),
+      h('td', { class: 'r nowrap' },
+        h('button', { class: 'lnk', title: 'Open it in Tiny Tally as a new invoice, filled in', onclick: () => tallySend(i.id) }, 'Tiny Tally'),
+        h('button', { class: 'lnk', onclick: () => editInvoiceModal(i) }, 'Edit'))))))));
+}
+
+async function tallySend(id) {
+  try { await call('sendToTally', { id }); } catch (x) { tiny.dialog.alert('Couldn’t send it to Tiny Tally', { detail: errMsg(x) }); }
+}
+
+// lines of a preview, as shown in the invoice dialog
+function previewBox(pre, currency) {
+  if (!pre || !pre.n) return h('div', { class: 'invsum muted' }, 'No uninvoiced time here up to that date. A running timer isn’t included until it’s stopped.');
+  const c = pre.client;
+  return h('div', { class: 'invsum' },
+    h('div', { class: 'muted' }, `${pre.n} ${pre.n === 1 ? 'entry' : 'entries'} · ${fmtPeriod(pre.from, pre.to)}`),
+    pre.lines.map((l) => h('div', { class: 'ln' }, h('span', null, l.project + ': ' + l.task),
+      h('span', { class: 'muted' }, fmtHours(l.seconds) + ' h × ' + money(l.rate, currency)), h('b', null, money(l.amount, currency)))),
+    c.discount_pct ? h('div', { class: 'ln' }, h('span', null, `Less ${c.discount_pct}% discount`), h('span'), h('b', null, '−' + money(pre.amount - pre.net, currency))) : null,
+    h('div', { class: 'ln tot' }, h('span', null, 'Total before tax'), h('span', { class: 'muted' }, fmtHours(pre.seconds) + ' h'), h('b', null, money(pre.net, currency))));
+}
+
+function invoiceModal(init) {
+  const clients = cat.clients.filter((c) => !c.archived || c.id === init.client_id);
+  if (!clients.length) { go('clients'); return; }
+  const cSel = h('select', { class: 'in' }, clients.map((c) => h('option', { value: c.id, selected: c.id === init.client_id }, c.name)));
+  const pSel = h('select', { class: 'in' });
+  const fillProjects = (sel) => {
+    const cid = Number(cSel.value);
+    pSel.replaceChildren(h('option', { value: '' }, 'All projects'),
+      ...cat.projects.filter((p) => p.client_id === cid).map((p) => h('option', { value: p.id, selected: p.id === sel }, p.name)));
+  };
+  fillProjects(init.project_id);
+  const upTo = h('input', { class: 'in', type: 'date', value: today });
+  const num = h('input', { class: 'in' });
+  const date = h('input', { class: 'in', type: 'date', value: today });
+  const amt = h('input', { class: 'in num' });
+  const notes = h('textarea', { class: 'in', rows: 2, placeholder: 'Notes (optional)' });
+  const box = h('div');
+  const err = h('div', { class: 'err' });
+  let pre = null, numTouched = false, seq = 0;
+  num.oninput = () => { numTouched = true; };
+  const load = async () => {
+    const my = ++seq;
+    err.textContent = '';
+    try {
+      const p = await call('invoicePreview', { client_id: Number(cSel.value), project_id: Number(pSel.value) || null, to: upTo.value || today });
+      if (my !== seq) return;
+      pre = p;
+      const cur = (cat.byClient[cSel.value] || {}).currency || 'USD';
+      if (!numTouched) num.value = p.suggested;
+      amt.placeholder = p.n ? money(p.net, cur) + ', from the time' : '';
+      box.replaceChildren(previewBox(p, cur));
+    } catch (x) { err.textContent = errMsg(x); }
+  };
+  cSel.onchange = () => { fillProjects(null); numTouched = false; load(); };
+  pSel.onchange = load; upTo.onchange = load;
+  const save = async (tally) => {
+    if (!pre || !pre.n) { err.textContent = 'There’s no uninvoiced time to put on this invoice.'; return; }
+    try {
+      await call('createInvoice', { client_id: Number(cSel.value), project_id: Number(pSel.value) || null, to: upTo.value || today,
+        number: num.value, date: date.value, amount: amt.value.trim(), notes: notes.value, tally });
+      closeModal();
+    } catch (x) { err.textContent = errMsg(x); }
+  };
+  const md = openModal('New Invoice',
+    [h('div', { class: 'cols' }, h('div', null, ...field('Client', cSel)), h('div', null, ...field('Project', pSel))),
+      ...field('Time up to and including', upTo),
+      box,
+      h('div', { class: 'cols' }, h('div', null, ...field('Invoice number', num)), h('div', null, ...field('Issued on', date))),
+      ...field('Amount billed', amt, 'Leave blank to use what the time is worth. Type the amount if you billed something else.'),
+      ...field('Notes', notes), err],
+    [spacer(), h('button', { class: 'btn', onclick: closeModal }, 'Cancel'),
+      h('button', { class: 'btn', onclick: () => save(false) }, 'Save'),
+      h('button', { class: 'btn primary', title: 'Save it here, then open it in Tiny Tally as a new invoice', onclick: () => save(true) }, 'Save & Open in Tiny Tally')]);
+  md.classList.add('wide');
+  load();
+}
+
+function editInvoiceModal(i) {
+  const num = h('input', { class: 'in', value: i.number });
+  const date = h('input', { class: 'in', type: 'date', value: i.date });
+  const amt = h('input', { class: 'in num', value: i.amount_set ? String(i.amount) : '', placeholder: i.amount_set ? '' : money(i.amount, i.currency) + ', from the time' });
+  const notes = h('textarea', { class: 'in', rows: 2, placeholder: 'Notes (optional)' }, i.notes);
+  const err = h('div', { class: 'err' });
+  const save = async () => {
+    try { await call('updateInvoice', { id: i.id, number: num.value, date: date.value, amount: amt.value.trim(), notes: notes.value }); closeModal(); return true; }
+    catch (x) { err.textContent = errMsg(x); return false; }
+  };
+  openModal('Invoice ' + (i.number || ''),
+    [h('div', { class: 'invsum' },
+      h('div', null, h('b', null, i.client), i.project ? h('span', { class: 'muted' }, ' · ' + i.project) : null),
+      h('div', { class: 'muted' }, `${i.n} ${i.n === 1 ? 'entry' : 'entries'} · ${fmtHours(i.seconds)} h · ${i.n ? fmtPeriod(i.first, i.last) : 'no entries left'}`)),
+    h('div', { class: 'cols' }, h('div', null, ...field('Invoice number', num)), h('div', null, ...field('Issued on', date))),
+    ...field('Amount billed', amt, 'Blank = what its time is worth at today’s rates.'),
+    ...field('Notes', notes), err],
+    [h('button', { class: 'btn danger ghost', onclick: async () => {
+      if (await confirmDanger(`Delete invoice ${i.number || ''}?`, `Its ${i.n} ${i.n === 1 ? 'entry goes' : 'entries go'} back to not invoiced. The time itself stays.`)) {
+        await call('deleteInvoice', { id: i.id }); closeModal();
+      }
+    } }, 'Delete'),
+    spacer(),
+    h('button', { class: 'btn', onclick: async () => { if (await save()) tallySend(i.id); } }, 'Open in Tiny Tally'),
+    h('button', { class: 'btn', onclick: closeModal }, 'Cancel'),
+    h('button', { class: 'btn primary', onclick: save }, 'Save')]);
+}
+
+// Harvest only says WHICH entries were invoiced. Ask for each invoice's number
+// and issue date; entries are split by date: each invoice takes the invoiced
+// entries after the previous one's date, up to its own.
+async function harvestInvoicesModal(ids) {
+  const entries = (await call('entriesByIds', { ids })).filter((e) => !e.invoice_id);
+  if (!entries.length) return;
+  const groups = new Map();
+  for (const e of entries) {
+    if (!groups.has(e.client_id)) groups.set(e.client_id, { client: e.client, currency: e.currency, entries: [], rows: [] });
+    groups.get(e.client_id).entries.push(e);
+  }
+  const err = h('div', { class: 'err' });
+  // invoice rows sorted by date → [{ row, list }], plus what's left after the last
+  const split = (g) => {
+    const rows = g.rows.filter((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.date.value)).sort((a, b) => (a.date.value < b.date.value ? -1 : 1));
+    let prev = '';
+    const out = rows.map((r) => { const list = g.entries.filter((e) => e.date > prev && e.date <= r.date.value); prev = r.date.value; return { r, list }; });
+    return { out, left: g.entries.filter((e) => e.date > prev) };
+  };
+  const worth = (list) => list.reduce((a, e) => a + (e.seconds / 3600) * e.rate, 0);
+  const paint = () => {
+    for (const g of groups.values()) {
+      const { out, left } = split(g);
+      for (const { r, list } of out) {
+        r.info.textContent = list.length ? `${list.length} entries · ${fmtHours(list.reduce((a, e) => a + e.seconds, 0))} h · ${money(worth(list), g.currency)}` : 'no invoiced entries up to this date';
+        r.amt.placeholder = list.length ? money(worth(list), g.currency) : '';
+      }
+      for (const r of g.rows) if (!out.some((o) => o.r === r)) r.info.textContent = 'pick the issue date';
+      g.left.textContent = left.length ? `${left.length} invoiced ${left.length === 1 ? 'entry is' : 'entries are'} after the last date (${fmtHours(left.reduce((a, e) => a + e.seconds, 0))} h). ${left.length === 1 ? 'It stays' : 'They stay'} not invoiced unless you add an invoice for ${left.length === 1 ? 'it' : 'them'}.` : '';
+    }
+  };
+  const addRow = (g, dateVal) => {
+    const r = {
+      num: h('input', { class: 'in sm', placeholder: 'Number', style: { width: '110px' } }),
+      date: h('input', { class: 'in sm', type: 'date', value: dateVal || '', onchange: paint }),
+      amt: h('input', { class: 'in sm num', style: { width: '120px' }, title: 'Amount billed. Blank = what the time is worth.' }),
+      info: h('span', { class: 'muted small grow' }),
+    };
+    r.el = h('div', { class: 'line hvrow' }, r.num, r.date, r.amt, r.info,
+      h('button', { class: 'lnk danger', title: 'Remove', onclick: () => { g.rows = g.rows.filter((x) => x !== r); r.el.remove(); paint(); } }, '✕'));
+    g.rows.push(r); g.list.append(r.el); paint();
+  };
+  const body = [h('div', { class: 'hint', style: { marginTop: 0 } }, 'Harvest’s export marks which entries were invoiced, but not on which invoice. Add each invoice’s number and issue date (they’re on the invoice PDFs). Each invoice takes the invoiced entries after the previous invoice’s date, up to its own.')];
+  for (const g of groups.values()) {
+    g.list = h('div');
+    g.left = h('div', { class: 'hint' });
+    const secs = g.entries.reduce((a, e) => a + e.seconds, 0);
+    body.push(h('div', { class: 'hvgroup' },
+      h('div', null, h('b', null, g.client), h('span', { class: 'muted' }, ` · ${g.entries.length} invoiced entries · ${fmtHours(secs)} h · ${fmtPeriod(g.entries[0].date, g.entries[g.entries.length - 1].date)}`)),
+      g.list,
+      h('button', { class: 'lnk', onclick: () => addRow(g, '') }, '+ Add another invoice'),
+      g.left));
+    addRow(g, g.entries[g.entries.length - 1].date);
+  }
+  body.push(err);
+  const save = async () => {
+    try {
+      for (const g of groups.values()) {
+        for (const { r, list } of split(g).out) {
+          if (!list.length) continue;
+          await call('createInvoice', { entry_ids: list.map((e) => e.id), number: r.num.value, date: r.date.value, amount: r.amt.value.trim(), notes: 'Imported from Harvest' });
+        }
+      }
+      closeModal(); go('invoices');
+    } catch (x) { err.textContent = errMsg(x); }
+  };
+  const md = openModal('Invoices from Harvest', body,
+    [h('span', { class: 'hint', style: { margin: 0 } }, 'Skip this and nothing is lost: import the file again later to come back here.'), spacer(),
+      h('button', { class: 'btn', onclick: closeModal }, 'Skip'), h('button', { class: 'btn primary', onclick: save }, 'Save Invoices')]);
+  md.classList.add('wide');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// IMPORT & EXPORT
+// ════════════════════════════════════════════════════════════════════════════
+async function renderData() {
+  const pr = (await call('getPrefs')).prefs;
+  const m = main(); m.replaceChildren();
+  const nameIn = (k, ph) => h('input', { class: 'in sm', placeholder: ph, value: (pr.harvestName || {})[k] || '', style: { width: '130px' },
+    onchange: (e) => { pr.harvestName = { ...(pr.harvestName || {}), [k]: e.target.value }; call('setPrefs', { harvestName: pr.harvestName }); } });
+  const empty = !cat.clients.length;
+  m.append(top('Import & Export'), h('div', { class: 'set' },
+    h('section', { class: 'card' }, h('h2', null, 'Import from Harvest'),
+      h('div', { class: 'hint' }, 'Use the CSV from Harvest’s Reports → Detailed time → Export. You’ll see what will be added before anything changes. Clients, projects and tasks are matched by name or created, and entries already here are skipped, so importing the same file again is safe.'),
+      h('div', { class: 'line' }, h('button', { class: 'btn', onclick: harvestImport }, icon('upload'), 'Import from Harvest…'))),
+    h('section', { class: 'card' }, h('h2', null, 'Export'),
+      h('div', { class: 'hint' }, 'All your time, ever. To export one range or client, use the export buttons in Reports.'),
+      h('div', { class: 'line' },
+        h('button', { class: 'btn', disabled: empty, onclick: () => harvestExport() }, icon('download'), 'Harvest CSV…'),
+        h('button', { class: 'btn', disabled: empty, onclick: async () => { const p = await call('exportCSV', { from: '0000-01-01', to: '9999-12-31' }); if (p) tiny.notify && tiny.notify('Exported', p); } }, icon('download'), 'Tiny Time CSV…')),
+      h('div', { class: 'hint' }, 'Harvest CSV has the same columns as Harvest’s own export. Tiny Time CSV is a simpler list: date, client, project, task, notes, hours, rate, amount.'),
+      h('div', { class: 'line' }, h('span', { class: 'lab' }, 'Name on Harvest exports'), nameIn('first', 'First name'), nameIn('last', 'Last name')))));
 }
 
 let rz = null;

@@ -56,6 +56,7 @@ closed. Restarting an entry from an earlier day starts a fresh copy today.
 | **Project** | name, client, color, its tasks |
 | **Task** | name, rate per hour, *common* (added automatically to every new project; optionally to all existing ones) |
 | **Entry** | date, project, task, notes, seconds, started_at |
+| **Invoice** | client, optional project, number, issue date, notes, the hours and amount billed (copied in when it's made), and the entries it covers |
 
 Anything with time logged against it can be archived but not deleted. Amounts use the
 task's rate in the client's currency. The report's billing summary applies each client's
@@ -65,11 +66,37 @@ Data lives in one SQLite file, `tinytime.db`, in the app's data folder
 (`~/Library/Application Support/art.tarwin.tinytime/` on macOS). Settings → Your data shows
 the path.
 
+**Invoices.** Invoices (in the sidebar) shows what isn't invoiced yet for each project, and
+since which invoice. An invoice here is only a record: *invoiced these entries, as number N,
+on date D, for this amount*. Tiny Time doesn't make PDFs or track payments. Recording one
+marks its entries as invoiced. Reports can filter by invoiced or not, and the Harvest export
+fills in `Invoiced?`. Restarting a timer on an invoiced entry starts a fresh copy, so billed
+time never grows. Deleting an invoice puts its time back to not invoiced.
+
+**Tiny Tally.** *Save & Open in Tiny Tally* (or *Tiny Tally* on any invoice) writes a
+`.tallyinvoice` file and opens it. Tiny Tally shows it as a new invoice, filled in with one
+line per project · task (hours × rate, with the dates covered), the client's discount, and an
+adjustment line if you typed a different amount. You check it and save it there. Neither app
+reads the other's database. The file format is described in Tiny Tally's
+`src/shared/invoiceHandoff.ts`.
+
+**Harvest.** *Import & Export* (in the sidebar, above Settings) → *Import from Harvest…*
+reads the CSV from Harvest's Reports → Detailed time → Export. It shows a preview first.
+Clients, projects and tasks are matched by name or created, and entries already present are
+skipped, so re-importing is safe. Tiny Time keeps one rate per task, so when Harvest used
+different rates for the same task the preview tells you. Harvest's export marks which entries were
+invoiced but not on which invoice, so after importing you're asked for each invoice's number
+and issue date (from the PDFs). Entries are split between invoices by date. The same page exports all your
+time as a Harvest CSV (same columns) or a plain Tiny Time CSV. Reports exports either format
+for the current range and filters.
+
 ## Files
 
 ```
 src/backend/main.js     tray, window lifecycle, api, idle detection, hotkeys
 src/backend/db.js       sqlite schema + queries
+src/backend/harvest.js  Harvest CSV parse + export
+src/backend/tally.js    invoice → .tallyinvoice hand-off for Tiny Tally
 src/backend/traypng.js  hand-rolled tray PNGs: the macOS pill (from Till), the square icon
 src/frontend/popover.*  the tray popover
 src/frontend/app.*      the dashboard

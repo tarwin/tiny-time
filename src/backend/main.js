@@ -17,6 +17,8 @@
 
 import * as db from './db.js';
 import { renderTrayPNG, renderTraySquarePNG } from './traypng.js';
+import { parseHarvest, toHarvestCSV } from './harvest.js';
+import { handoff } from './tally.js';
 
 const POP = { w: 380, h: 520 };
 // macOS gets the two-zone pill in the menu bar. Windows and Linux trays are
@@ -28,7 +30,7 @@ const SC_IDS = ['sc_pop', 'sc_timer', 'sc_new', 'sc_app'];
 
 let app;
 const DEFAULT_ACCENT = '#22a676';
-let prefs = { idleEnabled: true, idleMinutes: 10, weekStart: 1, accent: DEFAULT_ACCENT, appearance: 'system', shortcuts: {} };
+let prefs = { idleEnabled: true, idleMinutes: 10, weekStart: 1, accent: DEFAULT_ACCENT, appearance: 'system', shortcuts: {}, harvestName: { first: '', last: '' } };
 const isHex = (v) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
 const accentRGB = () => { const h = isHex(prefs.accent) ? prefs.accent : DEFAULT_ACCENT; return [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); };
 let popState = 'closed';                 // 'closed' | 'hidden' | 'shown'
@@ -367,23 +369,78 @@ export const api = {
   stopTimer: async () => { db.stopRunning(); changed(); return true; },
 
   // reports
-  report: async ({ from, to, client_id, project_id }) => {
+  report: async ({ from, to, client_id, project_id, invoiced }) => {
     if (!isYmd(from) || !isYmd(to)) throw new Error('Bad date range.');
-    return { rows: db.report(from, to, { client_id, project_id }), catalog: db.catalog(), today: today() };
+    return { rows: db.report(from, to, { client_id, project_id, invoiced }), catalog: db.catalog(), today: today() };
   },
-  exportCSV: async ({ from, to, client_id, project_id }) => {
-    const rows = db.exportRows(from, to, { client_id, project_id });
-    const path = await app.dialog.saveFile({ types: ['csv'], name: `tiny-time-${from}-to-${to}.csv` });
+  exportCSV: async ({ from, to, client_id, project_id, invoiced }) => {
+    const rows = db.exportRows(from, to, { client_id, project_id, invoiced });
+    const path = await app.dialog.saveFile({ types: ['csv'], name: from === '0000-01-01' ? `tiny-time-${today()}.csv` : `tiny-time-${from}-to-${to}.csv` });
     if (!path) return null;
     const cell = (v) => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-    const lines = [['Date', 'Client', 'Project', 'Task', 'Notes', 'Hours', 'Rate', 'Amount', 'Currency'].join(',')];
+    const lines = [['Date', 'Client', 'Project', 'Task', 'Notes', 'Hours', 'Rate', 'Amount', 'Currency', 'Invoice', 'Invoice Date'].join(',')];
     for (const r of rows) {
       const h = r.seconds / 3600;
-      lines.push([r.date, r.client, r.project, r.task, r.notes, h.toFixed(2), r.rate, (h * r.rate).toFixed(2), r.currency].map(cell).join(','));
+      lines.push([r.date, r.client, r.project, r.task, r.notes, h.toFixed(2), r.rate, (h * r.rate).toFixed(2), r.currency,
+        r.invoice_id ? r.invoice_number || '#' + r.invoice_id : '', r.invoice_date || ''].map(cell).join(','));
     }
     await tjs.writeFile(path, new TextEncoder().encode(lines.join('\n') + '\n'));
     return path;
   },
+
+  // Harvest: the same columns as its Detailed time report export. No range = everything.
+  exportHarvest: async ({ from, to, client_id, project_id, invoiced } = {}) => {
+    const all = !isYmd(from) || !isYmd(to);
+    const rows = db.exportRows(all ? '0000-01-01' : from, all ? '9999-12-31' : to, { client_id, project_id, invoiced });
+    if (!rows.length) throw new Error('There’s no time to export in this range.');
+    const name = all ? `harvest-time-${today()}.csv` : `harvest-time-${from}-to-${to}.csv`;
+    const path = await app.dialog.saveFile({ types: ['csv'], name });
+    if (!path) return null;
+    await tjs.writeFile(path, new TextEncoder().encode(toHarvestCSV(rows, prefs.harvestName)));
+    return { path, entries: rows.length };
+  },
+  // pick a file, preview what it would add, confirm, import
+  importHarvest: async () => {
+    const path = await app.dialog.openFile({ types: ['csv'] });
+    if (!path) return null;
+    const { rows, skipped, name } = parseHarvest(new TextDecoder().decode(await tjs.readFile(path)));
+    if (!rows.length) throw new Error('No time entries found in that file.');
+    const pre = db.importRows(rows, { dry: true });
+    const list = (label, xs) => (xs.length ? `\nNew ${label}: ${xs.slice(0, 6).join(', ')}${xs.length > 6 ? ` and ${xs.length - 6} more` : ''}` : '');
+    // already imported, but Harvest's invoiced flags haven't been turned into invoices yet
+    if (!pre.entries && pre.invoiced.length) return { entries: 0, duplicates: pre.duplicates, seconds: 0, invoiced: pre.invoiced, skipped };
+    if (!pre.entries) {
+      await app.dialog.alert('Nothing new to import', { detail: `All ${pre.duplicates} entries in this file are already in Tiny Time.` });
+      return { entries: 0, duplicates: pre.duplicates, invoiced: [] };
+    }
+    const detail = `${pre.entries} time entries, ${(pre.seconds / 3600).toFixed(1)} hours.`
+      + (pre.duplicates ? `\n${pre.duplicates} already in Tiny Time will be skipped.` : '')
+      + (skipped ? `\n${skipped} rows without a date, hours, client, project or task will be skipped.` : '')
+      + list('clients', pre.clients) + list('projects', pre.projects) + list('tasks', pre.tasks)
+      + (pre.rateNotes.length ? `\n\nRates are per task in Tiny Time, so some Harvest rates won't carry over:\n${pre.rateNotes.slice(0, 4).join('\n')}` : '')
+      + (pre.invoiced.length ? `\n\nHarvest marks ${pre.invoiced.length} of these entries as invoiced. Next you can say which invoices they were on.` : '');
+    if (!(await app.dialog.confirm('Import from Harvest?', { detail, ok: 'Import', cancel: 'Cancel' }))) return null;
+    const res = db.importRows(rows);
+    if (name && !prefs.harvestName.first && !prefs.harvestName.last) { prefs.harvestName = name; await save('prefs', prefs); }
+    changed();
+    return { ...res, skipped };
+  },
+
+  // invoices
+  invoices: async () => ({ invoices: db.invoices(), unbilled: db.unbilled(), today: today() }),
+  invoicePreview: async (sel) => {
+    const p = db.invoicePreview(sel);
+    return { ...p, suggested: db.suggestInvoiceNumber(p.client ? p.client.id : sel.client_id) };
+  },
+  createInvoice: async (inv) => {
+    const iid = db.createInvoice(inv);
+    changed();
+    return { id: iid, tally: inv.tally ? await sendToTally(iid) : null };
+  },
+  updateInvoice: async (inv) => { db.updateInvoice(inv); changed(); return true; },
+  deleteInvoice: async ({ id: x }) => { db.deleteInvoice(id(x)); changed(); return true; },
+  sendToTally: async ({ id: x }) => sendToTally(id(x)),
+  entriesByIds: async ({ ids }) => db.entriesByIds(ids),
 
   // settings
   getPrefs: async () => {
@@ -399,6 +456,7 @@ export const api = {
     if (patch.weekStart !== undefined) prefs.weekStart = Number(patch.weekStart) === 0 ? 0 : 1;
     if (patch.accent !== undefined) prefs.accent = isHex(patch.accent) ? patch.accent.toLowerCase() : DEFAULT_ACCENT;
     if (patch.appearance !== undefined) prefs.appearance = ['light', 'dark'].includes(patch.appearance) ? patch.appearance : 'system';
+    if (patch.harvestName !== undefined) prefs.harvestName = { first: String(patch.harvestName.first || '').trim().slice(0, 100), last: String(patch.harvestName.last || '').trim().slice(0, 100) };
     await save('prefs', prefs);
     if (patch.accent !== undefined) updateTray(true);
     if (patch.accent !== undefined || patch.appearance !== undefined) app.push('theme', { accent: prefs.accent, appearance: prefs.appearance });
@@ -418,6 +476,32 @@ export const api = {
   wipeAll: async () => { db.wipe(); changed(); return true; },
   quit: async () => { app.quit(); },
 };
+
+// ── Tiny Tally ───────────────────────────────────────────────────────────────
+// Write the invoice as a .tallyinvoice file and open it: Tiny Tally picks it up
+// as a new invoice, filled in. Without Tiny Tally, offer to save the file.
+async function sendToTally(invoiceId) {
+  const inv = db.invoice(invoiceId);
+  if (!inv) throw new Error('That invoice no longer exists.');
+  const data = handoff(inv, db.client(inv.client_id), db.invoiceEntries(invoiceId));
+  const bytes = new TextEncoder().encode(JSON.stringify(data, null, 2) + '\n');
+  const name = `Tiny Time invoice ${(inv.number || String(inv.id)).replace(/[\\/:*?"<>|]+/g, '-')}.tallyinvoice`;
+  const path = tmpDir + '/' + name;
+  await tjs.writeFile(path, bytes);
+  try {
+    await app.shell.open(path);
+    return { opened: true };
+  } catch (e) {
+    const ok = await app.dialog.confirm('Tiny Tally isn’t installed', {
+      detail: 'Tiny Tally opens these invoices as drafts. You can get it from apps.tarwin.art/tiny-tally, or save the invoice file to open later.',
+      ok: 'Save Invoice File…', cancel: 'Cancel',
+    });
+    if (!ok) return { opened: false };
+    const to = await app.dialog.saveFile({ types: ['tallyinvoice'], name });
+    if (to) await tjs.writeFile(to, bytes);
+    return { opened: false, saved: to || null };
+  }
+}
 
 // ── hooks ────────────────────────────────────────────────────────────────────
 export function onTray(tid) {
@@ -484,7 +568,7 @@ export async function init(a) {
   try { const t = (await app.paths()).temp; if (t) tmpDir = t.replace(/[\\/]$/, ''); } catch (e) {}
   if (!TOUR) try {
     const saved = await app.store.get('prefs');
-    if (saved && typeof saved === 'object') prefs = { ...prefs, ...saved, shortcuts: { ...(saved.shortcuts || {}) } };
+    if (saved && typeof saved === 'object') prefs = { ...prefs, ...saved, shortcuts: { ...(saved.shortcuts || {}) }, harvestName: { first: '', last: '', ...(saved.harvestName || {}) } };
   } catch (e) {}
   if (!TOUR) try {
     const pw = await app.store.get('popwin');
@@ -498,9 +582,11 @@ export async function init(a) {
     { title: 'View', items: [
       { id: 'view:time', label: 'Timesheet', key: '1' },
       { id: 'view:reports', label: 'Reports', key: '2' },
+      { id: 'view:invoices', label: 'Invoices', key: '7' },
       { id: 'view:clients', label: 'Clients', key: '3' },
       { id: 'view:projects', label: 'Projects', key: '4' },
       { id: 'view:tasks', label: 'Tasks', key: '5' },
+      { id: 'view:data', label: 'Import & Export', key: '6' },
       ...(IS_MAC ? [] : [{ separator: true }, { id: 'settings', label: 'Settings', key: ',' }]),
     ] },
   ]);
