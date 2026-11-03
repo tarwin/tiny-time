@@ -1,0 +1,78 @@
+/* Tiny Time — shared tokens. Appearance: System (default), Light or Dark —
+   set as data-theme on <html> by lib.js applyTheme(). */
+:root {
+  color-scheme: light dark;
+  --accent: #22a676;
+  --accent2: #1a8c63;
+  --accent-soft: rgba(34, 166, 118, .14);
+  --accent-ink: #1a8c63;        /* accent used as TEXT — kept readable on the surface */
+  --on-accent: #fff;            /* text/icons ON an accent fill */
+  --danger: #d9464f;
+  --bg: #ffffff;
+  --bg2: #f5f6f7;
+  --bg3: #eceef0;
+  --line: rgba(0, 0, 0, .09);
+  --text: #1d1f22;
+  --dim: #6a6f77;
+  --dim2: #9aa0a8;
+  --shadow: 0 12px 36px rgba(0, 0, 0, .22), 0 0 0 .5px rgba(0, 0, 0, .25);
+  --radius: 12px;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+/* Dark surfaces: when macOS is dark (unless the user forced Light), or when
+   the user forced Dark. Accent tokens are computed in lib.js for both. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1f2023;
+    --bg2: #26282c;
+    --bg3: #2f3136;
+    --line: rgba(255, 255, 255, .08);
+    --text: #eef0f2;
+    --dim: #9a9fa8;
+    --dim2: #6e737b;
+    --shadow: 0 14px 40px rgba(0, 0, 0, .55), 0 0 0 .5px rgba(0, 0, 0, .6);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+    --bg: #1f2023;
+    --bg2: #26282c;
+    --bg3: #2f3136;
+    --line: rgba(255, 255, 255, .08);
+    --text: #eef0f2;
+    --dim: #9a9fa8;
+    --dim2: #6e737b;
+    --shadow: 0 14px 40px rgba(0, 0, 0, .55), 0 0 0 .5px rgba(0, 0, 0, .6);
+}
+:root[data-theme="light"] { color-scheme: light; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { font: 13px/1.4 -apple-system, "SF Pro Text", system-ui, sans-serif; color: var(--text);
+  -webkit-font-smoothing: antialiased; cursor: default; }
+button { font: inherit; color: inherit; background: none; border: 0; cursor: default; }
+input, select, textarea { font: inherit; color: inherit; }
+.ic { width: 18px; height: 18px; display: block; flex: none; }
+.num { font-variant-numeric: tabular-nums; }
+
+/* form controls */
+.in { width: 100%; height: 30px; padding: 0 9px; border-radius: 7px; border: 1px solid var(--line);
+  background: var(--bg2); outline: none; }
+textarea.in { height: auto; min-height: 58px; padding: 7px 9px; resize: vertical; line-height: 1.35; }
+.in:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+select.in { -webkit-appearance: none; appearance: none; padding-right: 26px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%), linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 13px, calc(100% - 9px) 13px; background-size: 5px 5px; background-repeat: no-repeat; }
+label.f { display: block; font-size: 11.5px; font-weight: 600; color: var(--dim); margin: 10px 0 4px; }
+label.f:first-child { margin-top: 0; }
+
+.btn { height: 30px; padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border-radius: 7px; background: var(--bg3); font-weight: 500; white-space: nowrap; }
+.btn:hover { filter: brightness(.97); }
+.btn:active { filter: brightness(.92); }
+.btn.primary { background: var(--accent); color: var(--on-accent); }
+.btn.danger { color: var(--danger); }
+.btn.ghost { background: transparent; }
+.btn:disabled { opacity: .5; }
+
+.check { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.check input { accent-color: var(--accent); width: 15px; height: 15px; }
+.err { color: var(--danger); font-size: 12px; min-height: 16px; margin-top: 8px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }

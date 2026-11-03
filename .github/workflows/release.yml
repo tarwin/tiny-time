@@ -1,0 +1,143 @@
+# Release: Linux (x86_64 + arm64) and Windows builds, uploaded to a DRAFT
+# GitHub release v<version>. Manual only (workflow_dispatch).
+#
+# macOS isn't built here: it has to be signed and notarized, which happens on
+# the Mac (see RELEASING.md). Upload those files to the same draft, then
+# publish it.
+#
+# Bump the version in tinyjs.json and push BEFORE running
+# this: it packages what's committed.
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tinyjs_tag:
+        description: "tinyjs release tag to build against"
+        required: true
+        default: v0.70.3
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Read-only by default; only the job that uploads can write.
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The build runs in ubuntu:22.04, not on the runner, so the shipped
+      # binaries need nothing newer than glibc 2.35.
+      - name: Build in ubuntu:22.04
+        env:
+          TINYJS_TAG: ${{ inputs.tinyjs_tag }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/work"
+          docker run --rm \
+            -v "$PWD:/src:ro" \
+            -v "$RUNNER_TEMP/work:/work" \
+            -e TINYJS_TAG \
+            ubuntu:22.04 bash /src/scripts/pkg-linux-container.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/work/out/
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch tinyjs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TINYJS_TAG: ${{ inputs.tinyjs_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          gh release download $env:TINYJS_TAG -R tarwin/tinyjsapp -p tinyjs-windows-x86_64.zip -D $env:RUNNER_TEMP
+          if ($LASTEXITCODE -ne 0) { throw 'tinyjs download failed' }
+          Expand-Archive "$env:RUNNER_TEMP\tinyjs-windows-x86_64.zip" "$env:RUNNER_TEMP\tinyjs"
+          & "$env:RUNNER_TEMP\tinyjs\tinyjs.cmd" version
+
+      - name: Publish, verify and smoke
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # `tinyjs publish` zips with `tar -a`, and only Windows' own bsdtar
+          # writes a real zip. Git's GNU tar (also on PATH) writes a tar named
+          # .zip that Explorer opens as empty.
+          $env:PATH = "$env:SystemRoot\System32;$env:PATH"
+          $tar = (Get-Command tar).Source
+          if ($tar -notlike "$env:SystemRoot\*") { throw "tar resolves to $tar, not Windows' bsdtar" }
+
+          & "$env:RUNNER_TEMP\tinyjs\tinyjs.cmd" publish
+          if ($LASTEXITCODE -ne 0) { throw 'publish failed' }
+
+          $name = (Get-Content tinyjs.json -Raw | ConvertFrom-Json).name
+          $zip = Get-ChildItem dist\publish\*-win.zip | Select-Object -First 1
+          if (-not $zip) { throw 'no -win.zip in dist\publish' }
+
+          # A real zip, as Explorer sees it.
+          $x = "$env:RUNNER_TEMP\x"
+          Expand-Archive $zip.FullName $x
+          if (-not (Test-Path "$x\$name\$name.exe")) { throw "zip has no $name\$name.exe" }
+
+          # Smoke: launched from the extracted folder, it must stay up.
+          $p = Start-Process "$x\$name\$name.exe" -WorkingDirectory "$x\$name" -PassThru
+          Start-Sleep -Seconds 10
+          if ($p.HasExited) { throw "$name.exe exited within 10 s (code $($p.ExitCode))" }
+          Write-Host "smoke OK: $name.exe running after 10 s"
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          Get-Process launcher -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\out" | Out-Null
+          Copy-Item $zip.FullName "$env:RUNNER_TEMP\out\"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+
+      - name: Upload to the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ver=$(node -p "require('./tinyjs.json').version")
+          tag="v$ver"
+          ls -la out
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --draft --target "$GITHUB_SHA" --title "Tiny Time $ver" \
+              --notes "Tiny Time $ver. macOS builds are added after notarization."
+          fi
+          gh release upload "$tag" out/* --clobber

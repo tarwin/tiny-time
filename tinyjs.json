@@ -1,0 +1,17 @@
+{
+  "$schema": "https://tinyjs.app/schema/tinyjs.schema.json",
+  "name": "tiny-time",
+  "title": "Tiny Time",
+  "size": "380x520",
+  "id": "art.tarwin.tinytime",
+  "version": "0.1.0",
+  "minTinyjsVersion": "0.70.0",
+  "update": {
+    "url": "https://github.com/tarwin/tiny-time/releases/latest/download/manifest.json",
+    "auto": "daily"
+  },
+  "mainWindow": false,
+  "activation": "accessory",
+  "windowPlacement": true,
+  "attribution": "By Tarwin Stroh-Spijer · apps.tarwin.art/tiny-time"
+}

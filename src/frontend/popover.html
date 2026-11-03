@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Tiny Time</title>
+<link rel="stylesheet" href="common.css">
+<link rel="stylesheet" href="popover.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="pointer" id="pointer"></div>
+  <div class="card" id="card">
+    <header class="hdr" id="hdr" title="Drag to tear off into its own window">
+      <!-- shown only while torn off. CSS lights: the card is inset from the
+           window edge for its shadow, so native ones can't line up -->
+      <div class="lights" id="lights">
+        <button class="tl red" id="tlClose" title="Close"><span>×</span></button>
+        <button class="tl yel" id="tlMin" title="Minimize"><span>−</span></button>
+        <button class="tl grn" id="tlZoom" title="Zoom"><span>+</span></button>
+      </div>
+      <div class="hdr-date" id="hdrDate">Today</div>
+      <div class="hdr-tools">
+        <button class="hbtn" id="btnToday" title="Jump to today"><svg class="ic"><use href="#i-cal"/></svg></button>
+        <button class="hbtn" id="btnSummary" title="Time summary"><svg class="ic"><use href="#i-info"/></svg></button>
+        <button class="hbtn" id="btnApp" title="Open dashboard &amp; reports"><svg class="ic"><use href="#i-chart"/></svg></button>
+      </div>
+    </header>
+
+    <div class="week">
+      <button class="wnav" id="prevWk" title="Previous week"><svg class="ic"><use href="#i-left"/></svg></button>
+      <div class="days" id="days"></div>
+      <button class="wnav" id="nextWk" title="Next week"><svg class="ic"><use href="#i-right"/></svg></button>
+    </div>
+
+    <div class="body" id="body"></div>
+
+    <footer class="foot">
+      <button class="fbtn new" id="btnNew"><svg class="ic"><use href="#i-plus"/></svg><span>New Entry</span></button>
+      <span class="spacer"></span>
+      <span class="daytotal num" id="dayTotal"></span>
+      <button class="fbtn" id="btnGear" title="Menu"><svg class="ic"><use href="#i-gear"/></svg></button>
+    </footer>
+
+    <!-- entry form sheet -->
+    <div class="sheet" id="sheet">
+      <div class="sheet-hdr"><span id="sheetTitle">New Time Entry</span><span class="sheet-date" id="sheetDate"></span></div>
+      <div class="sheet-body">
+        <label class="f">Project</label>
+        <div id="fProjectWrap"></div>
+        <label class="f">Task</label>
+        <select class="in" id="fTask"></select>
+        <label class="f">Notes</label>
+        <textarea class="in" id="fNotes" rows="3" placeholder="What are you working on? (optional)"></textarea>
+        <label class="f">Duration</label>
+        <input class="in num" id="fDur" placeholder="Leave empty to start a timer — or 1:30, 1.5, 90m" autocomplete="off">
+        <div class="err" id="fErr"></div>
+      </div>
+      <div class="sheet-foot">
+        <button class="btn danger ghost" id="fDelete">Delete</button>
+        <span class="spacer"></span>
+        <button class="btn" id="fCancel">Cancel</button>
+        <button class="btn primary" id="fSave">Start Timer</button>
+      </div>
+    </div>
+
+    <div class="pop-layer" id="popLayer"></div>
+  </div>
+</div>
+<script type="module" src="popover.js"></script>
+</body>
+</html>
