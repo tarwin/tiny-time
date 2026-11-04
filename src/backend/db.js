@@ -88,6 +88,31 @@ export async function open(dir) {
   if (!q('PRAGMA table_info(entries)').some((c) => c.name === 'invoice_id'))
     db.exec('ALTER TABLE entries ADD COLUMN invoice_id INTEGER REFERENCES invoices(id)');
   db.exec('CREATE INDEX IF NOT EXISTS entries_invoice ON entries(invoice_id)');
+  // 0.3: what Indian GST invoices need: a GSTIN, state, country and SAC
+  const cols = q('PRAGMA table_info(clients)').map((c) => c.name);
+  for (const col of ['tax_id', 'state', 'country', 'sac']) {
+    if (!cols.includes(col)) db.exec(`ALTER TABLE clients ADD COLUMN ${col} TEXT NOT NULL DEFAULT ''`);
+  }
+}
+
+// India: invoice numbers follow GST's rules, and the year runs April to March.
+let india = false;
+export const setIndia = (on) => { india = !!on; };
+
+// "2026-07-01" → "2026-27"
+export function financialYear(date) {
+  const y = Number(date.slice(0, 4)), start = Number(date.slice(5, 7)) >= 4 ? y : y - 1;
+  return `${start}-${String(start + 1).slice(2)}`;
+}
+
+// Rule 46: up to 16 letters, digits, hyphens or slashes, unique within the financial year.
+function checkIndiaNumber(number, date, id) {
+  if (!india || !number) return;
+  if (number.length > 16) throw new Error('A GST invoice number is at most 16 characters.');
+  if (!/^[A-Za-z0-9/-]+$/.test(number)) throw new Error('A GST invoice number can only use letters, digits, hyphens and slashes.');
+  const year = financialYear(date);
+  const clash = q('SELECT date FROM invoices WHERE number = ? AND id IS NOT ?', number, id).some((i) => financialYear(i.date) === year);
+  if (clash) throw new Error(`Invoice ${number} is already used in ${year}.`);
 }
 
 // prepared statements are cached by SQL text — this process lives for days,
@@ -137,12 +162,13 @@ export function saveClient(c) {
   const name = str(c.name, 200);
   if (!name) throw new Error('A client needs a name.');
   const vals = [name, str(c.address, 2000), str(c.currency || 'USD', 8).toUpperCase(),
-    Math.max(0, Math.round(num(c.terms_days, 30))), pct(c.tax_pct), pct(c.discount_pct), c.archived ? 1 : 0];
+    Math.max(0, Math.round(num(c.terms_days, 30))), pct(c.tax_pct), pct(c.discount_pct), c.archived ? 1 : 0,
+    str(c.tax_id, 15).toUpperCase(), str(c.state, 2), str(c.country, 2).toUpperCase(), str(c.sac, 8)];
   if (c.id) {
-    run('UPDATE clients SET name=?, address=?, currency=?, terms_days=?, tax_pct=?, discount_pct=?, archived=? WHERE id=?', ...vals, c.id);
+    run('UPDATE clients SET name=?, address=?, currency=?, terms_days=?, tax_pct=?, discount_pct=?, archived=?, tax_id=?, state=?, country=?, sac=? WHERE id=?', ...vals, c.id);
     return c.id;
   }
-  return insert('INSERT INTO clients (name, address, currency, terms_days, tax_pct, discount_pct, archived, created_at) VALUES (?,?,?,?,?,?,?,?)', ...vals, now());
+  return insert('INSERT INTO clients (name, address, currency, terms_days, tax_pct, discount_pct, archived, tax_id, state, country, sac, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', ...vals, now());
 }
 export function deleteClient(id) {
   if (one('SELECT 1 AS x FROM invoices WHERE client_id = ?', id))
@@ -368,14 +394,30 @@ export function invoicePreview(sel) {
 }
 
 // "CW-2" → "CW-3", "0041" → "0042"; the client's last number first, then anyone's
-export function suggestInvoiceNumber(clientId) {
+export function suggestInvoiceNumber(clientId, today = '') {
+  const next = nextAfter(clientId, today);
+  if (!india) return next;
+  // never suggest one that's taken this year
+  let s = next, n = 0;
+  const free = (x) => !q('SELECT date FROM invoices WHERE number = ?', x).some((i) => financialYear(i.date) === financialYear(today || i.date));
+  while (!free(s) && n++ < 1000) s = bump(s);
+  return s;
+}
+
+function bump(number) {
+  const m = number.match(/^(.*?)(\d+)(\D*)$/);
+  if (!m) return number + '-2';
+  return m[1] + String(Number(m[2]) + 1).padStart(m[2].length, '0') + m[3];
+}
+
+function nextAfter(clientId, today) {
   const last = one('SELECT number FROM invoices WHERE client_id = ? AND number != \'\' ORDER BY date DESC, id DESC LIMIT 1', Number(clientId) || 0)
     || one('SELECT number FROM invoices WHERE number != \'\' ORDER BY date DESC, id DESC LIMIT 1');
   if (!last) return '1';
-  const m = last.number.match(/^(.*?)(\d+)(\D*)$/);
-  if (!m) return last.number + '-2';
-  const n = String(Number(m[2]) + 1).padStart(m[2].length, '0');
-  return m[1] + n + m[3];
+  // India: a number with the year in it starts again in the new financial year
+  const fy = india && today ? last.number.match(/^(.*?)(\d{4}-\d{2})(\D+)(\d+)$/) : null;
+  if (fy && fy[2] !== financialYear(today)) return fy[1] + financialYear(today) + fy[3] + '1'.padStart(fy[4].length, '0');
+  return bump(last.number);
 }
 
 // what was billed: [amount, typed?]. Blank = the time × rates, less discount.
@@ -388,6 +430,7 @@ const billed = (typed, worked) => {
 export function createInvoice(inv) {
   const date = /^\d{4}-\d{2}-\d{2}$/.test(inv.date || '') ? inv.date : null;
   if (!date) throw new Error('Pick the date the invoice was issued.');
+  checkIndiaNumber(str(inv.number, 60), date, null);
   return tx(() => {
     const pre = invoicePreview(inv);
     if (!pre.n) throw new Error('There’s no uninvoiced time to put on this invoice.');
@@ -403,6 +446,7 @@ export function updateInvoice(inv) {
   const date = /^\d{4}-\d{2}-\d{2}$/.test(inv.date || '') ? inv.date : null;
   if (!date) throw new Error('Pick the date the invoice was issued.');
   const id = Number(inv.id);
+  checkIndiaNumber(str(inv.number, 60), date, id);
   const cur = one('SELECT i.id, c.discount_pct FROM invoices i JOIN clients c ON c.id = i.client_id WHERE i.id = ?', id);
   if (!cur) throw new Error('That invoice no longer exists.');
   // blank goes back to what its time is worth now, at today's rates

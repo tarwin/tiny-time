@@ -30,7 +30,7 @@ const SC_IDS = ['sc_pop', 'sc_timer', 'sc_new', 'sc_app'];
 
 let app;
 const DEFAULT_ACCENT = '#22a676';
-let prefs = { idleEnabled: true, idleMinutes: 10, weekStart: 1, accent: DEFAULT_ACCENT, appearance: 'system', shortcuts: {}, harvestName: { first: '', last: '' } };
+let prefs = { idleEnabled: true, idleMinutes: 10, weekStart: 1, india: false, accent: DEFAULT_ACCENT, appearance: 'system', shortcuts: {}, harvestName: { first: '', last: '' } };
 const isHex = (v) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
 const accentRGB = () => { const h = isHex(prefs.accent) ? prefs.accent : DEFAULT_ACCENT; return [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); };
 let popState = 'closed';                 // 'closed' | 'hidden' | 'shown'
@@ -343,7 +343,7 @@ export const api = {
 
   // app window
   openApp: async ({ view } = {}) => { openApp(view); return true; },
-  appHello: async () => { const v = appPendingView; appPendingView = null; return { view: v, weekStart: prefs.weekStart, accent: prefs.accent, appearance: prefs.appearance }; },
+  appHello: async () => { const v = appPendingView; appPendingView = null; return { view: v, weekStart: prefs.weekStart, india: !!prefs.india, accent: prefs.accent, appearance: prefs.appearance }; },
 
   // catalog
   catalog: async () => db.catalog(),
@@ -430,7 +430,7 @@ export const api = {
   invoices: async () => ({ invoices: db.invoices(), unbilled: db.unbilled(), today: today() }),
   invoicePreview: async (sel) => {
     const p = db.invoicePreview(sel);
-    return { ...p, suggested: db.suggestInvoiceNumber(p.client ? p.client.id : sel.client_id) };
+    return { ...p, suggested: db.suggestInvoiceNumber(p.client ? p.client.id : sel.client_id, today()) };
   },
   createInvoice: async (inv) => {
     const iid = db.createInvoice(inv);
@@ -454,6 +454,7 @@ export const api = {
     if (patch.idleEnabled !== undefined) prefs.idleEnabled = !!patch.idleEnabled;
     if (patch.idleMinutes !== undefined) prefs.idleMinutes = Math.min(240, Math.max(1, Math.round(Number(patch.idleMinutes)) || 10));
     if (patch.weekStart !== undefined) prefs.weekStart = Number(patch.weekStart) === 0 ? 0 : 1;
+    if (patch.india !== undefined) { prefs.india = !!patch.india; db.setIndia(prefs.india); }
     if (patch.accent !== undefined) prefs.accent = isHex(patch.accent) ? patch.accent.toLowerCase() : DEFAULT_ACCENT;
     if (patch.appearance !== undefined) prefs.appearance = ['light', 'dark'].includes(patch.appearance) ? patch.appearance : 'system';
     if (patch.harvestName !== undefined) prefs.harvestName = { first: String(patch.harvestName.first || '').trim().slice(0, 100), last: String(patch.harvestName.last || '').trim().slice(0, 100) };
@@ -575,6 +576,7 @@ export async function init(a) {
     if (pw && pw.detached && pw.rect) { detached = true; detRect = pw.rect; }
   } catch (e) {}
   await db.open(TOUR || (await app.paths()).data);
+  db.setIndia(prefs.india);
   for (const sid of SC_IDS) if (prefs.shortcuts[sid]) { try { app.hotkey.register(sid, prefs.shortcuts[sid]); } catch (e) {} }
 
   app.menu.set([

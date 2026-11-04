@@ -7,6 +7,7 @@ import { $, el, h, icon, call, fmtHM, fmtHMS, fmtHours, parseDuration, parseYmd,
 let view = 'time';
 let cat = null;              // indexed catalog
 let weekStart = 1;
+let india = false;
 let today = ymd(new Date());
 let running = null;          // running entry (as of last load)
 let runBase = 0;
@@ -498,6 +499,10 @@ function clientModal(c) {
   terms.onchange = () => { days.style.display = terms.value === 'custom' ? '' : 'none'; if (terms.value === 'custom') days.focus(); };
   const pctIn = (v) => h('div', { class: 'withunit' }, h('input', { class: 'in num', type: 'number', min: 0, max: 100, step: '0.01', value: v }), h('span', { class: 'u' }, '%'));
   const tax = pctIn(c.tax_pct), disc = pctIn(c.discount_pct);
+  const gstin = h('input', { class: 'in', value: c.tax_id || '', placeholder: '27AAPFU0939F1ZV', maxlength: 15 });
+  const state = h('input', { class: 'in', value: c.state || '', placeholder: '27', maxlength: 2 });
+  const country = h('input', { class: 'in', value: c.country || '', placeholder: 'Blank if in India, or US, GB…', maxlength: 2 });
+  const sac = h('input', { class: 'in', value: c.sac || '', placeholder: '998314', maxlength: 8 });
   const arch = h('input', { type: 'checkbox', checked: !!c.archived });
   const err = h('div', { class: 'err' });
   const save = async () => {
@@ -506,7 +511,8 @@ function clientModal(c) {
     try {
       await call('saveClient', { id: c.id, name: name.value, address: addr.value, currency,
         terms_days: terms.value === 'custom' ? Number(days.value) : Number(terms.value),
-        tax_pct: Number(tax.firstChild.value), discount_pct: Number(disc.firstChild.value), archived: arch.checked });
+        tax_pct: Number(tax.firstChild.value), discount_pct: Number(disc.firstChild.value), archived: arch.checked,
+        tax_id: gstin.value, state: state.value, country: country.value, sac: sac.value });
       closeModal();
     } catch (x) { err.textContent = errMsg(x); }
   };
@@ -514,6 +520,8 @@ function clientModal(c) {
     [...field('Name', name), ...field('Address', addr),
       h('div', { class: 'cols' }, h('div', null, ...field('Currency', cur), curOther), h('div', null, ...field('Payment terms', terms), days)),
       h('div', { class: 'cols' }, h('div', null, ...field('Tax', tax)), h('div', null, ...field('Discount', disc))),
+      ...(india ? [h('div', { class: 'cols' }, h('div', null, ...field('GSTIN', gstin)), h('div', null, ...field('GST state code', state))),
+        h('div', { class: 'cols' }, h('div', null, ...field('Country code', country)), h('div', null, ...field('SAC code', sac)))] : []),
       c.id ? h('label', { class: 'check', style: { marginTop: '14px' } }, arch, 'Archived — hide from timers and pickers') : null, err],
     [c.id ? h('button', { class: 'btn danger ghost', onclick: async () => {
       if (!(await confirmDanger(`Delete “${c.name}”?`, 'This can’t be undone.'))) return;
@@ -643,6 +651,7 @@ async function renderSettings() {
   const mins = h('input', { class: 'in sm num', type: 'number', min: 1, max: 240, value: pr.idleMinutes, style: { width: '70px' }, onchange: (e) => call('setPrefs', { idleMinutes: Number(e.target.value) }) });
   const wk = h('select', { class: 'in sm', onchange: (e) => call('setPrefs', { weekStart: Number(e.target.value) }).then((x) => { weekStart = x.weekStart; }) },
     h('option', { value: 1, selected: pr.weekStart === 1 }, 'Monday'), h('option', { value: 0, selected: pr.weekStart === 0 }, 'Sunday'));
+  const inMode = h('input', { type: 'checkbox', checked: !!pr.india, onchange: (e) => call('setPrefs', { india: e.target.checked }).then((x) => { india = !!x.india; }) });
   const sc = h('div');
   const paintSc = () => sc.replaceChildren(...SLOTS.map(([id, label]) => {
     const combo = pr.shortcuts[id];
@@ -694,7 +703,8 @@ async function renderSettings() {
       h('label', { class: 'check' }, login, 'Start Tiny Time when I log in', P.autostart === 'unsupported' ? h('span', { class: 'muted' }, ' (only in the built app)') : null),
       h('div', { class: 'line' }, h('label', { class: 'check', style: { margin: 0 } }, idle, 'Stop the timer when I’ve been idle for'), mins, h('span', { class: 'muted' }, 'minutes')),
       h('div', { class: 'hint', style: { marginLeft: '23px' } }, 'The idle stretch is taken back off the entry, and you get a notification.'),
-      h('div', { class: 'line' }, h('span', { class: 'lab' }, 'Weeks start on'), wk)),
+      h('div', { class: 'line' }, h('span', { class: 'lab' }, 'Weeks start on'), wk),
+      h('div', { class: 'line' }, h('label', { class: 'check', style: { margin: 0 } }, inMode, 'I bill from India (GST invoice numbers, April financial year, GST details on clients)'))),
     h('section', { class: 'card' }, h('h2', null, 'Global shortcuts'), h('div', { class: 'hint', style: { marginBottom: '6px' } }, IS_MAC ? 'Work from any app. Use ⌘, ⌃ or ⌥ plus a key.' : 'Work from any app. Use Ctrl or Alt plus a key.'), sc),
     h('section', { class: 'card' }, h('h2', null, 'Your data'),
       h('div', { class: 'hint' }, 'Everything stays on this computer, in one SQLite file:'),
@@ -725,16 +735,23 @@ async function renderInvoices() {
   const ub = res.unbilled, invs = res.invoices;
   const ubCur = {}, yrCur = {};
   for (const u of ub) ubCur[u.currency] = (ubCur[u.currency] || 0) + u.amount;
-  const yr = res.today.slice(0, 4);
-  for (const i of invs) if (i.date.startsWith(yr)) yrCur[i.currency] = (yrCur[i.currency] || 0) + i.amount;
+  // the calendar year, or in India the financial year from April
+  const fyOf = (d) => { const y = Number(d.slice(0, 4)), s = Number(d.slice(5, 7)) >= 4 ? y : y - 1; return `${s}-${String(s + 1).slice(2)}`; };
+  const yearOf = (d) => (india ? fyOf(d) : d.slice(0, 4));
+  const yr = yearOf(res.today);
+  const inYear = invs.filter((i) => yearOf(i.date) === yr);
+  for (const i of inYear) yrCur[i.currency] = (yrCur[i.currency] || 0) + i.amount;
   const last = invs[0];
   m.append(h('div', { class: 'tiles' },
     tile('Not invoiced', fmtHours(ub.reduce((a, u) => a + u.seconds, 0)) + ' h', ub.reduce((a, u) => a + u.n, 0) + ' entries'),
     tile('Worth', sumMoney(ubCur), 'at your task rates'),
-    tile('Invoiced in ' + yr, sumMoney(yrCur), invs.filter((i) => i.date.startsWith(yr)).length + ' invoices'),
+    tile('Invoiced in ' + yr, sumMoney(yrCur), inYear.length + ' invoices'),
     tile('Last invoice', last ? last.number || '—' : '—', last ? fmtDay(last.date) + ' · ' + last.client : 'none yet')));
 
   m.append(h('h2', { class: 'sect' }, 'Not invoiced yet'));
+  // GST: invoice services within 30 days of supplying them (Rule 47)
+  const stale = india ? ub.filter((u) => (Date.parse(res.today) - Date.parse(u.first)) / 864e5 > 30) : [];
+  if (stale.length) m.append(h('div', { class: 'card empty-note' }, `${stale.length} ${stale.length === 1 ? 'project has' : 'projects have'} time older than 30 days. GST invoices for services are due within 30 days of supply.`));
   if (!ub.length) m.append(h('div', { class: 'card empty-note' }, 'All your time is invoiced.'));
   else m.append(h('div', { class: 'card' }, h('table', { class: 'grid' },
     h('thead', null, h('tr', null, h('th', null, 'Project'), h('th', null, 'Since last invoice'), h('th', { class: 'r' }, 'Entries'),
@@ -966,7 +983,7 @@ let rz = null;
 window.addEventListener('resize', () => { if (view !== 'reports') return; clearTimeout(rz); rz = setTimeout(refresh, 150); });
 
 // ── boot ─────────────────────────────────────────────────────────────────────
-call('appHello').then((s) => { applyTheme(s); weekStart = s.weekStart; go(s.view || 'time'); });
+call('appHello').then((s) => { applyTheme(s); weekStart = s.weekStart; india = !!s.india; go(s.view || 'time'); });
 
 // screenshot tour (scripts/screenshots.sh) sets scenes from the backend
 tiny.api.on('tour', async (t) => {

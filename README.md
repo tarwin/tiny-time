@@ -52,7 +52,7 @@ closed. Restarting an entry from an earlier day starts a fresh copy today.
 
 | | fields |
 |---|---|
-| **Client** | name, address, currency, payment terms (Net 0/7/14/15/30/45/60/90 or custom days), tax %, discount % |
+| **Client** | name, address, currency, payment terms (Net 0/7/14/15/30/45/60/90 or custom days), tax %, discount %, and for India a GSTIN, state code, country and SAC |
 | **Project** | name, client, color, its tasks |
 | **Task** | name, rate per hour, *common* (added automatically to every new project; optionally to all existing ones) |
 | **Entry** | date, project, task, notes, seconds, started_at |
@@ -79,6 +79,12 @@ line per project · task (hours × rate, with the dates covered), the client's d
 adjustment line if you typed a different amount. You check it and save it there. Neither app
 reads the other's database. The file format is described in Tiny Tally's
 `src/shared/invoiceHandoff.ts`.
+
+**India.** Settings → *I bill from India* follows GST's invoice rules: numbers of up to 16
+letters, digits, hyphens or slashes, unique in the financial year; a number with the year in
+it (`INV/2026-27/001`) starts again each April; the Invoices page counts from April and flags
+time older than 30 days. Clients get GST fields, which go to Tiny Tally with the invoice. The
+tax itself is worked out in Tiny Tally.
 
 **Harvest.** *Import & Export* (in the sidebar, above Settings) → *Import from Harvest…*
 reads the CSV from Harvest's Reports → Detailed time → Export. It shows a preview first.

@@ -32,6 +32,7 @@ export function handoff(inv, client, entries) {
     description: `${l.project}: ${l.task} (${period(l.from, l.to)})`,
     quantity: round2(l.seconds / 3600),
     unitPrice: l.rate,
+    ...(client.sac ? { hsn: client.sac } : {}),
   }));
   const worked = out.reduce((a, l) => a + l.quantity * l.unitPrice, 0);
   // the client's discount, then whatever was typed as the billed amount
@@ -43,7 +44,7 @@ export function handoff(inv, client, entries) {
   return {
     tallyInvoice: 1,
     source: 'Tiny Time',
-    customer: { name: client.name, address: client.address || '' },
+    customer: { name: client.name, address: client.address || '', taxId: client.tax_id || '', state: client.state || '', country: client.country || '' },
     number: inv.number || '',
     issueDate: inv.date,
     dueDays: client.terms_days,

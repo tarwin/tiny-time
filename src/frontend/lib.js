@@ -81,7 +81,8 @@ const fmts = {};
 export function money(amount, currency) {
   const c = (currency || 'USD').toUpperCase();
   try {
-    fmts[c] ||= new Intl.NumberFormat(undefined, { style: 'currency', currency: c });
+    // rupees group in lakhs and crores, whatever the system's language
+    fmts[c] ||= new Intl.NumberFormat(c === 'INR' ? 'en-IN' : undefined, { style: 'currency', currency: c });
     return fmts[c].format(amount);
   } catch (e) {
     return c + ' ' + amount.toFixed(2);
