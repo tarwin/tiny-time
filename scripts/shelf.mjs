@@ -35,6 +35,12 @@ if (git('status', '--porcelain').trim()) {
   console.error(`${examples} has uncommitted changes; commit or stash them first.`);
   process.exit(1);
 }
+// Shelf reads the catalog from main, and pulling here would rebase any other branch.
+const branch = git('rev-parse', '--abbrev-ref', 'HEAD').trim();
+if (branch !== 'main') {
+  console.error(`${examples} is on ${branch}; switch it to main first.`);
+  process.exit(1);
+}
 git('pull', '--quiet', '--rebase', 'origin', 'main');
 
 const release = JSON.parse(run('gh', ['release', 'view', tag, '--json', 'body,isDraft']));
@@ -142,5 +148,10 @@ git('add', 'catalog.json', 'shelf/src/frontend/catalog.js', `shelf/src/frontend/
 git('commit', '--quiet', '-m', `catalog: ${config.name} ${version} (from tarwin/${config.name})`);
 if (push) {
   git('push', '--quiet', 'origin', 'main');
+  git('fetch', '--quiet', 'origin', 'main');
+  if (git('rev-parse', 'HEAD') !== git('rev-parse', 'origin/main')) {
+    console.error(`Pushed, but origin/main doesn't have this commit. Shelf still lists the old version.`);
+    process.exit(1);
+  }
   console.log(`Shelf lists ${config.title} ${version}.`);
 } else console.log(`Committed to ${examples}; not pushed (--no-push).`);

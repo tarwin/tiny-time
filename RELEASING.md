@@ -36,7 +36,7 @@ Platform differences, all handled in the app:
 5. Shelf: `node scripts/shelf.mjs`. It copies the release files to a
    `tiny-time-v<version>` release in tinyjsapp-examples (Shelf only downloads
    from there), writes Tiny Time's catalog entry and pushes.
-   `../tinyjsapp-examples` must be clean. Shelf only installs apps whose id
+   `../tinyjsapp-examples` must be on `main` and clean. Shelf only installs apps whose id
    starts with `art.tarwin.`.
 6. Microsite: apps.tarwin.art/tiny-time picks the release up by itself
    (download buttons per platform, version and notes come from the latest
