@@ -4,7 +4,7 @@
   "title": "Tiny Time",
   "size": "380x520",
   "id": "art.tarwin.tinytime",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minTinyjsVersion": "0.70.0",
   "update": {
     "url": "https://github.com/tarwin/tiny-time/releases/latest/download/manifest.json",
