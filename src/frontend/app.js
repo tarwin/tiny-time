@@ -102,13 +102,14 @@ function paintUpdates() {
     : upd.latest ? `${upd.latest} is ready to install.`
     : upd.error ? `Couldn’t check: ${upd.error}`
     : upd.checkedAt ? 'Up to date.' : '';
-  updBox.replaceChildren(
+  // replaceChildren writes a null as the text "null": drop the empty parts
+  updBox.replaceChildren(...[
     h('div', { class: 'line' }, h('span', { class: 'lab' }, h('b', null, 'Version ' + (upd.current || '—')), status ? h('span', { class: 'muted' }, ' · ' + status) : null),
       upd.latest
         ? h('button', { class: 'btn primary', disabled: upd.installing, onclick: installUpdate }, upd.installing ? 'Updating…' : 'Restart and Update')
         : h('button', { class: 'btn', disabled: upd.checking, onclick: () => call('checkUpdate').catch(() => {}) }, 'Check Now')),
     upd.latest && upd.notes ? h('div', { class: 'hint', style: { whiteSpace: 'pre-line' } }, upd.notes) : null,
-    h('div', { class: 'hint' }, `Tiny Time looks for updates once a day and tells you when one is ready. Last checked ${ago(upd.checkedAt)}.`));
+    h('div', { class: 'hint' }, `Tiny Time looks for updates once a day and tells you when one is ready. Last checked ${ago(upd.checkedAt)}.`)].filter(Boolean));
 }
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && $('modalLayer').classList.contains('open')) closeModal();
