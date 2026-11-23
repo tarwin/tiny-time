@@ -2,6 +2,8 @@
 //
 // clients ─< projects >─< project_tasks >─ tasks
 //    │            └──────< entries >───────┘
+// A task's rate applies everywhere unless project_tasks.rate overrides it for
+// one project (Harvest bills per project, so imports need that).
 //    └──< invoices ─────────────┘ (entries.invoice_id)
 //
 // An invoice here is only a record: "invoiced these entries, as number N,
@@ -88,6 +90,9 @@ export async function open(dir) {
   if (!q('PRAGMA table_info(entries)').some((c) => c.name === 'invoice_id'))
     db.exec('ALTER TABLE entries ADD COLUMN invoice_id INTEGER REFERENCES invoices(id)');
   db.exec('CREATE INDEX IF NOT EXISTS entries_invoice ON entries(invoice_id)');
+  // 0.4: a task can bill at a different rate on one project (NULL = the task's own)
+  if (!q('PRAGMA table_info(project_tasks)').some((c) => c.name === 'rate'))
+    db.exec('ALTER TABLE project_tasks ADD COLUMN rate REAL');
   // 0.3: what Indian GST invoices need: a GSTIN, state, country and SAC
   const cols = q('PRAGMA table_info(clients)').map((c) => c.name);
   for (const col of ['tax_id', 'state', 'country', 'sac']) {
@@ -141,6 +146,9 @@ const pct = (v) => Math.min(100, Math.max(0, num(v)));
 // seconds including the live stretch of a running entry — as SQL, so
 // aggregates are always current
 const LIVE = `(e.seconds + CASE WHEN e.started_at > 0 THEN MAX(0, (? - e.started_at) / 1000) ELSE 0 END)`;
+// what an entry bills at: its project's rate for the task, else the task's own
+const RATE = 'COALESCE(pt.rate, t.rate)';
+const PT_JOIN = 'LEFT JOIN project_tasks pt ON pt.project_id = e.project_id AND pt.task_id = e.task_id';
 
 // ── catalog ──────────────────────────────────────────────────────────────────
 export function catalog() {
@@ -149,10 +157,14 @@ export function catalog() {
                       FROM projects p ORDER BY p.archived, p.name COLLATE NOCASE`);
   const tasks = q(`SELECT t.*, (SELECT COUNT(*) FROM entries e WHERE e.task_id = t.id) AS entry_count
                    FROM tasks t ORDER BY t.archived, t.name COLLATE NOCASE`);
-  const links = q('SELECT project_id, task_id FROM project_tasks');
-  const byProject = {};
-  for (const l of links) (byProject[l.project_id] ||= []).push(l.task_id);
-  for (const p of projects) p.task_ids = byProject[p.id] || [];
+  const links = q('SELECT project_id, task_id, rate FROM project_tasks');
+  const byProject = {}, rates = {};
+  for (const l of links) {
+    (byProject[l.project_id] ||= []).push(l.task_id);
+    if (l.rate != null) (rates[l.project_id] ||= {})[l.task_id] = l.rate;
+  }
+  // task_rates: { task_id: rate } where this project overrides the task's rate
+  for (const p of projects) { p.task_ids = byProject[p.id] || []; p.task_rates = rates[p.id] || {}; }
   for (const c of clients) c.project_count = projects.filter((p) => p.client_id === c.id).length;
   return { clients, projects, tasks, palette: PALETTE };
 }
@@ -200,8 +212,16 @@ export function saveProject(p) {
       // never unlink a task that already has time logged on this project
       const used = new Set(q('SELECT DISTINCT task_id FROM entries WHERE project_id = ?', id).map((r) => r.task_id));
       for (const t of used) if (!taskIds.includes(t)) taskIds.push(t);
+      // rates: { task_id: rate | null } when given; otherwise keep the ones set
+      const kept = new Map(q('SELECT task_id, rate FROM project_tasks WHERE project_id = ?', id).map((r) => [r.task_id, r.rate]));
+      const given = p.task_rates && typeof p.task_rates === 'object' ? p.task_rates : null;
+      const rateFor = (t) => {
+        if (!given) return kept.has(t) ? kept.get(t) : null;
+        const v = given[t];
+        return v === '' || v == null || !Number.isFinite(Number(v)) ? null : Math.max(0, Number(v));
+      };
       run('DELETE FROM project_tasks WHERE project_id = ?', id);
-      for (const t of taskIds) run('INSERT OR IGNORE INTO project_tasks (project_id, task_id) VALUES (?, ?)', id, t);
+      for (const t of taskIds) run('INSERT OR IGNORE INTO project_tasks (project_id, task_id, rate) VALUES (?, ?, ?)', id, t, rateFor(t));
     }
     return id;
   });
@@ -237,9 +257,9 @@ export function deleteTask(id) {
 // ── entries ──────────────────────────────────────────────────────────────────
 const ENTRY_COLS = `e.id, e.date, e.project_id, e.task_id, e.notes, e.started_at, e.created_at,
   ${LIVE} AS seconds, p.name AS project, p.color, c.id AS client_id, c.name AS client,
-  c.currency, t.name AS task, t.rate, e.invoice_id, i.number AS invoice_number, i.date AS invoice_date`;
+  c.currency, t.name AS task, ${RATE} AS rate, e.invoice_id, i.number AS invoice_number, i.date AS invoice_date`;
 const ENTRY_FROM = `FROM entries e JOIN projects p ON p.id = e.project_id JOIN clients c ON c.id = p.client_id
-  JOIN tasks t ON t.id = e.task_id LEFT JOIN invoices i ON i.id = e.invoice_id`;
+  JOIN tasks t ON t.id = e.task_id ${PT_JOIN} LEFT JOIN invoices i ON i.id = e.invoice_id`;
 
 export function entriesBetween(from, to) {
   return q(`SELECT ${ENTRY_COLS} ${ENTRY_FROM} WHERE e.date BETWEEN ? AND ? ORDER BY e.date DESC, e.created_at DESC`, now(), from, to);
@@ -326,7 +346,7 @@ export function report(from, to, filter = {}) {
   if (filter.project_id) { where += ' AND p.id = ?'; args.push(Number(filter.project_id)); }
   if (filter.invoiced === 'yes') where += ' AND e.invoice_id IS NOT NULL';
   if (filter.invoiced === 'no') where += ' AND e.invoice_id IS NULL';
-  return q(`SELECT e.date, e.project_id, e.task_id, c.id AS client_id, SUM(${LIVE}) AS seconds, COUNT(*) AS n
+  return q(`SELECT e.date, e.project_id, e.task_id, c.id AS client_id, ${RATE} AS rate, SUM(${LIVE}) AS seconds, COUNT(*) AS n
             ${ENTRY_FROM} WHERE ${where} GROUP BY e.date, e.project_id, e.task_id ORDER BY e.date`, ...args);
 }
 
@@ -348,7 +368,7 @@ const BILLABLE = 'e.invoice_id IS NULL AND e.started_at = 0';
 // number is honest), with the last invoice that covered that project.
 export function unbilled() {
   const rows = q(`SELECT c.id AS client_id, c.name AS client, c.currency, p.id AS project_id, p.name AS project, p.color,
-      COUNT(*) AS n, SUM(${LIVE}) AS seconds, SUM(${LIVE} * t.rate) / 3600.0 AS amount, MIN(e.date) AS first, MAX(e.date) AS last
+      COUNT(*) AS n, SUM(${LIVE}) AS seconds, SUM(${LIVE} * ${RATE}) / 3600.0 AS amount, MIN(e.date) AS first, MAX(e.date) AS last
     ${ENTRY_FROM} WHERE e.invoice_id IS NULL GROUP BY p.id ORDER BY c.name COLLATE NOCASE, p.name COLLATE NOCASE`, now(), now());
   for (const r of rows) {
     r.last_invoice = one(`SELECT id, number, date FROM invoices WHERE id IN (SELECT invoice_id FROM entries WHERE project_id = ?)
@@ -450,7 +470,7 @@ export function updateInvoice(inv) {
   const cur = one('SELECT i.id, c.discount_pct FROM invoices i JOIN clients c ON c.id = i.client_id WHERE i.id = ?', id);
   if (!cur) throw new Error('That invoice no longer exists.');
   // blank goes back to what its time is worth now, at today's rates
-  const worked = one(`SELECT COALESCE(SUM(e.seconds * t.rate), 0) / 3600.0 AS a FROM entries e JOIN tasks t ON t.id = e.task_id WHERE e.invoice_id = ?`, id).a;
+  const worked = one(`SELECT COALESCE(SUM(e.seconds * ${RATE}), 0) / 3600.0 AS a FROM entries e JOIN tasks t ON t.id = e.task_id ${PT_JOIN} WHERE e.invoice_id = ?`, id).a;
   run('UPDATE invoices SET number = ?, date = ?, notes = ?, amount = ?, amount_set = ? WHERE id = ?', str(inv.number, 60), date, str(inv.notes, 2000),
     ...billed(inv.amount, worked * (1 - cur.discount_pct / 100)), id);
 }
@@ -496,19 +516,21 @@ export function importRows(rows, { dry = false } = {}) {
   // invoice here yet (new ones, and matches already in the db)
   const out = { entries: 0, duplicates: 0, seconds: 0, clients: [], projects: [], tasks: [], rateNotes: [], invoiced: [] };
 
-  // a task's rate is global here; Harvest's can differ per project, so new
-  // tasks take the rate most of their rows used
-  const taskRates = new Map();
+  // Harvest's rates are per project. A new task takes the rate most of its
+  // billable rows used; where a project billed it at something else, that
+  // project gets its own rate for the task (project_tasks.rate).
+  const tally = (map, k, rate) => {
+    const m = map.get(k) || new Map();
+    m.set(rate, (m.get(rate) || 0) + 1);
+    map.set(k, m);
+  };
+  const usual = (m) => (m ? [...m.entries()].sort((a, b) => b[1] - a[1])[0][0] : null);
+  const taskRates = new Map(), linkRates = new Map();
   for (const r of rows) {
     if (r.rate == null) continue;
-    const m = taskRates.get(key(r.task)) || new Map();
-    m.set(r.rate, (m.get(r.rate) || 0) + 1);
-    taskRates.set(key(r.task), m);
+    if (r.rate > 0) tally(taskRates, key(r.task), r.rate);
+    tally(linkRates, key(r.client) + '|' + key(r.project) + '|' + key(r.task), r.rate);
   }
-  const usualRate = (task) => {
-    const m = taskRates.get(key(task));
-    return m ? [...m.entries()].sort((a, b) => b[1] - a[1])[0][0] : 0;
-  };
 
   db.exec('BEGIN');
   try {
@@ -517,7 +539,7 @@ export function importRows(rows, { dry = false } = {}) {
     const tasks = new Map(q('SELECT id, name, rate FROM tasks').map((t) => [key(t.name), { id: t.id, rate: t.rate }]));
     let nProjects = one('SELECT COUNT(*) AS n FROM projects').n;
     const seen = new Map();       // dedupe key → existing entries in the db not matched to a row yet
-    const rateWarned = new Set();
+    const linked = new Set();     // project|task links whose rate this import has settled
 
     for (const r of rows) {
       let cid = clients.get(key(r.client));
@@ -533,15 +555,28 @@ export function importRows(rows, { dry = false } = {}) {
       }
       let t = tasks.get(key(r.task));
       if (!t) {
-        const rate = usualRate(r.task);
+        const rate = usual(taskRates.get(key(r.task))) || 0;
         t = { id: insert('INSERT INTO tasks (name, rate, created_at) VALUES (?,?,?)', str(r.task, 200), rate, now()), rate };
         tasks.set(key(r.task), t); out.tasks.push(r.task);
       }
-      if (r.rate != null && r.rate !== t.rate && !rateWarned.has(t.id)) {
-        rateWarned.add(t.id);
-        out.rateNotes.push(`${r.task}: Harvest has ${r.rate}/h on ${r.project}, Tiny Time uses ${t.rate}/h`);
+      const lk = pid + '|' + t.id;
+      if (!linked.has(lk)) {
+        linked.add(lk);
+        const want = usual(linkRates.get(key(r.client) + '|' + key(r.project) + '|' + key(r.task)));
+        const link = one('SELECT rate FROM project_tasks WHERE project_id = ? AND task_id = ?', pid, t.id);
+        // only set a rate where no time is logged yet, so existing amounts never move
+        const fresh = !link || !one('SELECT 1 AS x FROM entries WHERE project_id = ? AND task_id = ?', pid, t.id);
+        let rate = link ? link.rate : null;
+        if (fresh && want != null) rate = want === t.rate ? null : want;
+        if (!link) run('INSERT INTO project_tasks (project_id, task_id, rate) VALUES (?, ?, ?)', pid, t.id, rate);
+        else if (rate !== link.rate) run('UPDATE project_tasks SET rate = ? WHERE project_id = ? AND task_id = ?', rate, pid, t.id);
+        const effective = rate != null ? rate : t.rate;
+        if (want != null && want !== effective)
+          out.rateNotes.push(`${r.task} on ${r.project}: Harvest has ${want}/h, Tiny Time keeps ${effective}/h`);
+        const used = linkRates.get(key(r.client) + '|' + key(r.project) + '|' + key(r.task));
+        if (used && used.size > 1)
+          out.rateNotes.push(`${r.task} on ${r.project}: Harvest used ${[...used.keys()].join(', ')}/h; Tiny Time uses ${want}/h for all of it`);
       }
-      run('INSERT OR IGNORE INTO project_tasks (project_id, task_id) VALUES (?, ?)', pid, t.id);
 
       const notes = str(r.notes, 4000);
       const dk = [r.date, pid, t.id, r.seconds, notes].join('|');

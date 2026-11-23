@@ -53,13 +53,13 @@ closed. Restarting an entry from an earlier day starts a fresh copy today.
 | | fields |
 |---|---|
 | **Client** | name, address, currency, payment terms (Net 0/7/14/15/30/45/60/90 or custom days), tax %, discount %, and for India a GSTIN, state code, country and SAC |
-| **Project** | name, client, color, its tasks |
+| **Project** | name, client, color, its tasks, and optionally its own rate for any of them |
 | **Task** | name, rate per hour, *common* (added automatically to every new project; optionally to all existing ones) |
 | **Entry** | date, project, task, notes, seconds, started_at |
 | **Invoice** | client, optional project, number, issue date, notes, the hours and amount billed (copied in when it's made), and the entries it covers |
 
 Anything with time logged against it can be archived but not deleted. Amounts use the
-task's rate in the client's currency. The report's billing summary applies each client's
+task's rate (or the project's own rate for it) in the client's currency. The report's billing summary applies each client's
 discount and then tax.
 
 Data lives in one SQLite file, `tinytime.db`, in the app's data folder
@@ -89,8 +89,9 @@ tax itself is worked out in Tiny Tally.
 **Harvest.** *Import & Export* (in the sidebar, above Settings) → *Import from Harvest…*
 reads the CSV from Harvest's Reports → Detailed time → Export. It shows a preview first.
 Clients, projects and tasks are matched by name or created, and entries already present are
-skipped, so re-importing is safe. Tiny Time keeps one rate per task, so when Harvest used
-different rates for the same task the preview tells you. Harvest's export marks which entries were
+skipped, so re-importing is safe. Harvest's rates are per project, so where a
+project billed a task at a different rate, that project gets its own rate for the task. The preview lists
+any rate that couldn't carry over (time already logged here at another rate, or several rates in one project). Harvest's export marks which entries were
 invoiced but not on which invoice, so after importing you're asked for each invoice's number
 and issue date (from the PDFs). Entries are split between invoices by date. The same page exports all your
 time as a Harvest CSV (same columns) or a plain Tiny Time CSV. Reports exports either format

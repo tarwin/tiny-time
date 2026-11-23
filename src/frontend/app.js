@@ -302,7 +302,7 @@ async function renderReports() {
   // enrich rows
   for (const r of rows) {
     const t = cat.byTask[r.task_id], c = cat.byClient[r.client_id];
-    r.hours = r.seconds / 3600; r.rate = t ? t.rate : 0; r.amount = r.hours * r.rate; r.currency = c ? c.currency : 'USD';
+    r.hours = r.seconds / 3600; r.rate = r.rate != null ? r.rate : t ? t.rate : 0; r.amount = r.hours * r.rate; r.currency = c ? c.currency : 'USD';
   }
   const totalSec = rows.reduce((a, r) => a + r.seconds, 0);
   const days = new Set(rows.map((r) => r.date)).size;
@@ -561,24 +561,30 @@ function projectModal(p) {
   const sw = h('div', { class: 'swatches' });
   const paintSw = () => sw.replaceChildren(...cat.palette.map((col) => h('button', { class: 'sw' + (col === color ? ' on' : ''), style: { background: col }, onclick: () => { color = col; paintSw(); } })));
   paintSw();
-  const checks = new Map();
+  const checks = new Map(), rates = new Map();
+  const own = p.task_rates || {};
   const tl = h('div', { class: 'tasklist' }, cat.tasks.filter((t) => !t.archived || p.task_ids.includes(t.id)).map((t) => {
     const cb = h('input', { type: 'checkbox', checked: p.task_ids.includes(t.id) });
-    checks.set(t.id, cb);
-    return h('label', { class: 'check' }, cb, t.name, t.common ? h('span', { class: 'badge' }, 'Common') : null, h('span', { class: 'r' }, t.rate ? t.rate + '/h' : ''));
+    // blank = the task's own rate; a number = this project's rate for it
+    const rt = h('input', { class: 'in sm num rate', type: 'number', min: 0, step: '0.01', value: own[t.id] != null ? own[t.id] : '',
+      placeholder: t.rate ? String(t.rate) : '0', title: `Rate on this project. Blank = the task’s rate (${t.rate || 0}/h).` });
+    checks.set(t.id, cb); rates.set(t.id, rt);
+    return h('div', { class: 'check' }, h('label', { class: 'check', style: { margin: 0, flex: 1 } }, cb, t.name, t.common ? h('span', { class: 'badge' }, 'Common') : null),
+      rt, h('span', { class: 'muted', style: { fontSize: '12px' } }, '/h'));
   }));
   const arch = h('input', { type: 'checkbox', checked: !!p.archived });
   const err = h('div', { class: 'err' });
   const save = async () => {
     try {
       await call('saveProject', { id: p.id, name: name.value, client_id: Number(client.value), color, archived: arch.checked,
-        task_ids: [...checks].filter(([, cb]) => cb.checked).map(([id]) => id) });
+        task_ids: [...checks].filter(([, cb]) => cb.checked).map(([id]) => id),
+        task_rates: Object.fromEntries([...rates].map(([id, el]) => [id, el.value.trim()])) });
       closeModal();
     } catch (x) { err.textContent = errMsg(x); }
   };
   openModal(isNew ? 'New Project' : 'Edit Project',
     [...field('Name', name), ...field('Client', client), ...field('Color', sw),
-      ...field('Tasks', cat.tasks.length ? tl : h('div', { class: 'muted' }, 'No tasks yet — create some under Tasks.'), isNew ? 'Common tasks are ticked for you.' : 'Tasks with time logged stay attached.'),
+      ...field('Tasks', cat.tasks.length ? tl : h('div', { class: 'muted' }, 'No tasks yet — create some under Tasks.'), (isNew ? 'Common tasks are ticked for you.' : 'Tasks with time logged stay attached.') + ' Leave a rate blank to use the task’s own.'),
       !isNew ? h('label', { class: 'check', style: { marginTop: '14px' } }, arch, 'Archived — hide from timers and pickers') : null, err],
     [!isNew ? h('button', { class: 'btn danger ghost', onclick: async () => {
       if (!(await confirmDanger(`Delete “${p.name}”?`, 'This can’t be undone.'))) return;

@@ -417,7 +417,7 @@ export const api = {
       + (pre.duplicates ? `\n${pre.duplicates} already in Tiny Time will be skipped.` : '')
       + (skipped ? `\n${skipped} rows without a date, hours, client, project or task will be skipped.` : '')
       + list('clients', pre.clients) + list('projects', pre.projects) + list('tasks', pre.tasks)
-      + (pre.rateNotes.length ? `\n\nRates are per task in Tiny Time, so some Harvest rates won't carry over:\n${pre.rateNotes.slice(0, 4).join('\n')}` : '')
+      + (pre.rateNotes.length ? `\n\nSome Harvest rates won't carry over exactly:\n${pre.rateNotes.slice(0, 6).join('\n')}${pre.rateNotes.length > 6 ? `\nand ${pre.rateNotes.length - 6} more` : ''}` : '')
       + (pre.invoiced.length ? `\n\nHarvest marks ${pre.invoiced.length} of these entries as invoiced. Next you can say which invoices they were on.` : '');
     if (!(await app.dialog.confirm('Import from Harvest?', { detail, ok: 'Import', cancel: 'Cancel' }))) return null;
     const res = db.importRows(rows);
@@ -469,7 +469,7 @@ export const api = {
     try { return await app.launchAtLogin.get(); } catch (e) { return 'unsupported'; }
   },
   setShortcut: async ({ id: sid, combo }) => ({ ok: await applyShortcut(sid, combo || null), shortcuts: prefs.shortcuts }),
-  revealData: async () => { try { app.shell.reveal((await app.paths()).data); } catch (e) {} return true; },
+  revealData: async () => { try { await app.shell.reveal((await app.paths()).data.replace(/\/$/, '') + '/tinytime.db'); } catch (e) {} return true; },
   seedSample: async () => {
     if (!db.isEmpty()) throw new Error('Sample data can only be added to an empty Tiny Time.');
     db.seed(today()); changed(); return true;
