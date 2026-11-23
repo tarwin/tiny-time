@@ -65,6 +65,51 @@ tiny.api.on('tick', (t) => {
 });
 tiny.api.on('changed', () => refresh());
 tiny.api.on('view', ({ view: v }) => go(v));
+
+// ── updates ──────────────────────────────────────────────────────────────────
+// The backend finds them (see self-update in main.js); here a banner offers
+// the restart, and Settings shows the version and when it last looked.
+let upd = { current: '', latest: null, notes: null, checkedAt: 0, checking: false, installing: false, error: '' };
+let updDismissed = null;     // the version "Later" was clicked for
+function onUpdate(u) {
+  upd = u;
+  paintUpdateBanner();
+  if (view === 'settings' && updBox) paintUpdates();
+}
+tiny.api.on('update', onUpdate);
+async function installUpdate() {
+  try { await call('installUpdate'); } catch (x) { tiny.dialog.alert('Couldn’t install the update', { detail: errMsg(x) }); }
+}
+function paintUpdateBanner() {
+  let b = document.getElementById('updBanner');
+  if (!upd.latest || updDismissed === upd.latest) { if (b) b.remove(); return; }
+  if (!b) { b = h('div', { id: 'updBanner', class: 'updbanner' }); document.body.append(b); }
+  b.replaceChildren(
+    h('div', { class: 'ut' }, `Tiny Time ${upd.latest} is ready`),
+    h('div', { class: 'un' }, upd.notes || 'Restart to start using the new version. Your time is saved as you go.'),
+    h('div', { class: 'line' },
+      h('button', { class: 'btn primary', disabled: upd.installing, onclick: installUpdate }, upd.installing ? 'Updating…' : 'Restart and Update'),
+      h('button', { class: 'btn ghost', disabled: upd.installing, onclick: () => { updDismissed = upd.latest; paintUpdateBanner(); } }, 'Later')));
+}
+let updBox = null;
+function paintUpdates() {
+  const ago = (t) => {
+    if (!t) return 'not yet this session';
+    const d = new Date(t);
+    return (ymd(d) === ymd(new Date()) ? 'today' : ymd(d)) + ' at ' + d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0');
+  };
+  const status = upd.checking ? 'Checking…'
+    : upd.latest ? `${upd.latest} is ready to install.`
+    : upd.error ? `Couldn’t check: ${upd.error}`
+    : upd.checkedAt ? 'Up to date.' : '';
+  updBox.replaceChildren(
+    h('div', { class: 'line' }, h('span', { class: 'lab' }, h('b', null, 'Version ' + (upd.current || '—')), status ? h('span', { class: 'muted' }, ' · ' + status) : null),
+      upd.latest
+        ? h('button', { class: 'btn primary', disabled: upd.installing, onclick: installUpdate }, upd.installing ? 'Updating…' : 'Restart and Update')
+        : h('button', { class: 'btn', disabled: upd.checking, onclick: () => call('checkUpdate').catch(() => {}) }, 'Check Now')),
+    upd.latest && upd.notes ? h('div', { class: 'hint', style: { whiteSpace: 'pre-line' } }, upd.notes) : null,
+    h('div', { class: 'hint' }, `Tiny Time looks for updates once a day and tells you when one is ready. Last checked ${ago(upd.checkedAt)}.`));
+}
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && $('modalLayer').classList.contains('open')) closeModal();
   else if (mod(e) && e.key.toLowerCase() === 'n' && !$('modalLayer').classList.contains('open')) { e.preventDefault(); if (cat && cat.projects.length) entryModal(); }
@@ -104,8 +149,11 @@ async function harvestImport() {
       await tiny.dialog.alert('Imported from Harvest', { detail: `${r.entries} time entries, ${(r.seconds / 3600).toFixed(1)} hours.`
         + (r.duplicates ? ` ${r.duplicates} were already here and were skipped.` : '') });
     }
-    if (inv.length) { go('invoices'); await harvestInvoicesModal(inv); }
-    else if (r.entries) go('reports');
+    if (!inv.length) { if (r.entries) go('reports'); return; }
+    go('invoices');
+    // the import is done by now: a failure here is only the invoices step
+    try { await harvestInvoicesModal(inv); }
+    catch (x) { tiny.dialog.alert('Couldn’t set up the Harvest invoices', { detail: errMsg(x) + '\n\nYour time was imported. Import the same file again to come back to this step.' }); }
   } catch (x) { tiny.dialog.alert('Couldn’t import that file', { detail: errMsg(x) }); }
 }
 async function harvestExport(range) {
@@ -650,6 +698,7 @@ let P = null;
 async function renderSettings() {
   P = await call('getPrefs');
   const pr = P.prefs;
+  updBox = h('div'); paintUpdates();
   const m = main(); m.replaceChildren();
   const login = h('input', { type: 'checkbox', checked: P.autostart === true || P.autostart === 'enabled', disabled: P.autostart === 'unsupported',
     onchange: async (e) => { P.autostart = await call('setAutostart', { enabled: e.target.checked }); } });
@@ -712,6 +761,7 @@ async function renderSettings() {
       h('div', { class: 'line' }, h('span', { class: 'lab' }, 'Weeks start on'), wk),
       h('div', { class: 'line' }, h('label', { class: 'check', style: { margin: 0 } }, inMode, 'I bill from India (GST invoice numbers, April financial year, GST details on clients)'))),
     h('section', { class: 'card' }, h('h2', null, 'Global shortcuts'), h('div', { class: 'hint', style: { marginBottom: '6px' } }, IS_MAC ? 'Work from any app. Use ⌘, ⌃ or ⌥ plus a key.' : 'Work from any app. Use Ctrl or Alt plus a key.'), sc),
+    h('section', { class: 'card' }, h('h2', null, 'Updates'), updBox),
     h('section', { class: 'card' }, h('h2', null, 'Your data'),
       h('div', { class: 'hint' }, 'Everything stays on this computer, in one SQLite file:'),
       h('div', { class: 'line' }, h('code', { class: 'muted', style: { fontFamily: 'var(--mono)', fontSize: '11.5px', flex: 1, overflowWrap: 'anywhere' } }, (P.dataDir || '') + '/tinytime.db'),
@@ -899,7 +949,8 @@ async function harvestInvoicesModal(ids) {
   if (!entries.length) return;
   const groups = new Map();
   for (const e of entries) {
-    if (!groups.has(e.client_id)) groups.set(e.client_id, { client: e.client, currency: e.currency, entries: [], rows: [] });
+    // every group's elements exist before any paint(): paint() redraws them all
+    if (!groups.has(e.client_id)) groups.set(e.client_id, { client: e.client, currency: e.currency, entries: [], rows: [], list: h('div'), left: h('div', { class: 'hint' }) });
     groups.get(e.client_id).entries.push(e);
   }
   const err = h('div', { class: 'err' });
@@ -935,8 +986,6 @@ async function harvestInvoicesModal(ids) {
   };
   const body = [h('div', { class: 'hint', style: { marginTop: 0 } }, 'Harvest’s export marks which entries were invoiced, but not on which invoice. Add each invoice’s number and issue date (they’re on the invoice PDFs). Each invoice takes the invoiced entries after the previous invoice’s date, up to its own.')];
   for (const g of groups.values()) {
-    g.list = h('div');
-    g.left = h('div', { class: 'hint' });
     const secs = g.entries.reduce((a, e) => a + e.seconds, 0);
     body.push(h('div', { class: 'hvgroup' },
       h('div', null, h('b', null, g.client), h('span', { class: 'muted' }, ` · ${g.entries.length} invoiced entries · ${fmtHours(secs)} h · ${fmtPeriod(g.entries[0].date, g.entries[g.entries.length - 1].date)}`)),
@@ -990,6 +1039,7 @@ window.addEventListener('resize', () => { if (view !== 'reports') return; clearT
 
 // ── boot ─────────────────────────────────────────────────────────────────────
 call('appHello').then((s) => { applyTheme(s); weekStart = s.weekStart; india = !!s.india; go(s.view || 'time'); });
+call('updateState').then(onUpdate).catch(() => {});
 
 // screenshot tour (scripts/screenshots.sh) sets scenes from the backend
 tiny.api.on('tour', async (t) => {

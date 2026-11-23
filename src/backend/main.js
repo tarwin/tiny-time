@@ -96,7 +96,7 @@ function updateTray(force) {
                : { id: 'resume', label: 'Start last timer', enabled: false },
     { separator: true },
     { id: 'settings', label: 'Settings…' },
-    { id: 'check-updates', label: 'Check for Updates…' },
+    upd.latest ? { id: 'install-update', label: `Update to ${upd.latest}…` } : { id: 'check-updates', label: 'Check for Updates…' },
     { id: 'quit', label: 'Quit Tiny Time' },
   ];
   const tooltip = IS_MAC
@@ -469,6 +469,9 @@ export const api = {
     try { return await app.launchAtLogin.get(); } catch (e) { return 'unsupported'; }
   },
   setShortcut: async ({ id: sid, combo }) => ({ ok: await applyShortcut(sid, combo || null), shortcuts: prefs.shortcuts }),
+  updateState: async () => updState(),
+  checkUpdate: async () => runCheck(false),
+  installUpdate: async () => installUpdate(),
   revealData: async () => { try { await app.shell.reveal((await app.paths()).data.replace(/\/$/, '') + '/tinytime.db'); } catch (e) {} return true; },
   seedSample: async () => {
     if (!db.isEmpty()) throw new Error('Sample data can only be added to an empty Tiny Time.');
@@ -514,27 +517,78 @@ export function onTray(tid) {
   if (tid === 'stop') { db.stopRunning(); changed(); return; }
   if (tid === 'resume') { const l = db.lastEntry(); if (l) { db.startEntry(l.id, today()); changed(); } return; }
   if (tid === 'check-updates') { checkForUpdates(); return; }
+  if (tid === 'install-update') { offerUpdate(); return; }
   if (tid === 'quit') { app.quit(); }
 }
 
 // ── self-update (tinyjs verifies sha256 + signature, swaps, relaunches) ──────
-// "Check for Updates…" installs; the daily background check only notifies.
-async function checkForUpdates() {
+// tinyjs checks the manifest itself ("update": { "auto": "daily" } in
+// tinyjs.json) and calls onUpdateAvailable. A found update shows in the
+// menu-bar menu, as a banner in the app window and in Settings, and as a
+// notification at most once a day. Nothing installs without being asked.
+const upd = { current: '', latest: null, notes: null, checkedAt: 0, checking: false, installing: false, error: '' };
+const updState = () => ({ ...upd });
+
+async function foundUpdate(info) {
+  const fresh = info.latest !== upd.latest;
+  Object.assign(upd, { latest: info.latest, notes: info.notes || null, error: '' });
+  if (info.current) upd.current = info.current;
+  if (fresh) { updateTray(true); app.push('update', updState()); }
+  if (TOUR) return;
+  let last = null;
+  try { last = await app.store.get('updateNotified'); } catch (e) {}
+  if (last && last.version === info.latest && last.day === today()) return;
+  await save('updateNotified', { version: info.latest, day: today() });
+  app.notify(`Tiny Time ${info.latest} is ready`, 'Click to see what’s new and update.', { id: 'update' });
+}
+
+// quiet: the launch check, which says nothing unless there's an update
+async function runCheck(quiet) {
+  upd.checking = true; upd.error = '';
+  app.push('update', updState());
   try {
     const r = await app.update.check();
-    if (r && r.available) {
-      app.notify('Updating Tiny Time…', 'v' + r.latest + ' is downloading. Tiny Time will relaunch.');
-      await app.update.install();
-    } else {
-      app.notify('Tiny Time is up to date', 'v' + ((r && r.current) || '') + ' is the latest.');
-    }
+    upd.checkedAt = Date.now();
+    if (r && r.current) upd.current = r.current;
+    if (r && r.available && r.latest) await foundUpdate(r);
+    else if (upd.latest) { upd.latest = null; upd.notes = null; updateTray(true); }
   } catch (e) {
-    app.notify('Update check failed', String((e && e.message) || e));
+    upd.error = String((e && e.message) || e);
+    if (!quiet) throw e;
+  } finally {
+    upd.checking = false;
+    app.push('update', updState());
+  }
+  return updState();
+}
+
+async function installUpdate() {
+  upd.installing = true; app.push('update', updState());
+  try { await app.update.install(); }   // resolves just before the relaunch
+  catch (e) { upd.installing = false; upd.error = String((e && e.message) || e); app.push('update', updState()); throw e; }
+  return true;
+}
+
+// the menu-bar way in: a dialog works with no window open
+async function offerUpdate() {
+  const ok = await app.dialog.confirm(`Tiny Time ${upd.latest} is ready`, {
+    detail: (upd.notes ? upd.notes + '\n\n' : '') + `You have ${upd.current || 'an older version'}. Tiny Time restarts to update; a running timer keeps running.`,
+    ok: 'Restart and Update', cancel: 'Later' });
+  if (!ok) return;
+  try { await installUpdate(); } catch (e) { app.notify('Couldn’t install the update', upd.error); }
+}
+
+async function checkForUpdates() {
+  try {
+    await runCheck(false);
+    if (upd.latest) await offerUpdate();
+    else app.notify('Tiny Time is up to date', (upd.current || '') + ' is the latest version.');
+  } catch (e) {
+    app.notify('Couldn’t check for updates', upd.error);
   }
 }
-export function onUpdateAvailable(info) {
-  app.notify('Tiny Time update available', 'v' + info.latest + ' is ready. Choose “Check for Updates…” in the menu-bar menu to install it.');
-}
+export function onUpdateAvailable(info) { foundUpdate(info); }
+export function onNotificationClick(nid) { if (nid === 'update') openApp('settings'); }
 
 export function onHotkey(hid) {
   if (hid === 'sc_pop') togglePopover();
@@ -592,6 +646,11 @@ export async function init(a) {
       ...(IS_MAC ? [] : [{ separator: true }, { id: 'settings', label: 'Settings', key: ',' }]),
     ] },
   ]);
+
+  try { upd.current = (await app.info()).version || ''; } catch (e) {}
+  // our own quiet check a minute after launch and then daily, on top of
+  // tinyjs's, so Settings can say when it last looked
+  if (!TOUR) { setTimeout(() => runCheck(true), 60_000); setInterval(() => runCheck(true), 24 * 3600_000); }
 
   updateTray(true);
   setInterval(() => {
